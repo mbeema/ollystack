@@ -1,0 +1,54 @@
+server:
+  address: ":8080"
+  mode: "release"
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 120s
+  cors:
+    enabled: true
+    allowed_origins:
+      - "http://localhost:3000"
+    allowed_methods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowed_headers:
+      - Authorization
+      - Content-Type
+      - X-Correlation-ID
+
+auth:
+  enabled: true
+
+storage:
+  metrics:
+    type: clickhouse
+    endpoint: "${CLICKHOUSE_HOST:ollystack-clickhouse}:${CLICKHOUSE_PORT:9000}"
+    database: "${CLICKHOUSE_DATABASE:ollystack}"
+    username: "${CLICKHOUSE_USER:default}"
+    password: "${CLICKHOUSE_PASSWORD:}"
+  logs:
+    type: clickhouse
+    endpoint: "${CLICKHOUSE_HOST:ollystack-clickhouse}:${CLICKHOUSE_PORT:9000}"
+    database: "${CLICKHOUSE_DATABASE:ollystack}"
+    username: "${CLICKHOUSE_USER:default}"
+    password: "${CLICKHOUSE_PASSWORD:}"
+  traces:
+    type: clickhouse
+    endpoint: "${CLICKHOUSE_HOST:ollystack-clickhouse}:${CLICKHOUSE_PORT:9000}"
+    database: "${CLICKHOUSE_DATABASE:ollystack}"
+    username: "${CLICKHOUSE_USER:default}"
+    password: "${CLICKHOUSE_PASSWORD:}"
+
+ai:
+  enabled: false
+  provider: "${AI_PROVIDER:openai}"
+  model: "${AI_MODEL:gpt-4}"
+  api_key: "${AI_API_KEY:}"
+
+features:
+  service_map: true
+  anomaly_detection: true
+  natural_language: true
