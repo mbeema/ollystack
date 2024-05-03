@@ -1,0 +1,54 @@
+# OllyStack Ingestion Gateway Configuration
+#
+# This gateway receives OTLP telemetry and writes to Kafka
+# for durability and fan-out processing.
+
+server:
+  grpc_port: 4317       # OTLP gRPC
+  http_port: 4318       # OTLP HTTP + Health
+  metrics_port: 8888    # Prometheus metrics
+
+kafka:
+  # Broker addresses (can be overridden with KAFKA_BROKERS env var)
+  brokers:
+    - kafka:9092
+
+  # Topic configuration
+  metrics_topic: ollystack-metrics
+  logs_topic: ollystack-logs
+  traces_topic: ollystack-traces
+  alerts_topic: ollystack-alerts
+
+  # Producer settings for throughput vs latency tradeoff
+  compression: lz4        # Options: none, gzip, snappy, lz4, zstd
+  batch_size: 16384       # 16KB - larger = more throughput, higher latency
+  linger_ms: 5            # Wait up to 5ms to batch messages
+  acks: all               # Wait for all replicas (safest)
+  retries: 3              # Retry failed sends
+  retry_backoff_ms: 100
+  max_message_bytes: 1048576  # 1MB max message size
+
+  # TLS (optional - for secure Kafka clusters)
+  tls:
+    enabled: false
+    # cert_file: /etc/ssl/certs/kafka-client.crt
+    # key_file: /etc/ssl/private/kafka-client.key
+    # ca_file: /etc/ssl/certs/kafka-ca.crt
+
+  # SASL authentication (optional)
+  sasl:
+    enabled: false
+    # mechanism: SCRAM-SHA-256  # Options: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
+    # username: ${KAFKA_SASL_USERNAME}
+    # password: ${KAFKA_SASL_PASSWORD}
+
+rate_limit:
+  enabled: true
+  default_rps: 10000           # 10k requests/second per tenant
+  default_burst: 20000         # Allow 2x burst
+  default_bytes_per_sec: 104857600  # 100MB/sec per tenant
+
+tenancy:
+  enabled: true
+  tenant_header: X-Tenant-ID   # HTTP header for tenant identification
+  default_tenant_id: default   # Used when no tenant specified
