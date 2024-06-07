@@ -1,0 +1,54 @@
+[package]
+name = "ollystack-stream-processor"
+version = "0.1.0"
+edition = "2021"
+authors = ["OllyStack Team"]
+description = "Real-time stream processing engine for telemetry data"
+license = "Apache-2.0"
+repository = "https://github.com/ollystack/ollystack"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Telemetry
+opentelemetry = "0.21"
+opentelemetry-otlp = { version = "0.14", features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "0.21", features = ["rt-tokio"] }
+opentelemetry-proto = "0.4"
+tonic = "0.10"
+prost = "0.12"
+
+# Data processing
+arrow = { version = "50", features = ["ipc"] }
+datafusion = "35"
+
+# ML/Analytics
+ndarray = "0.15"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Configuration
+config = "0.14"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+anyhow = "1.0"
+thiserror = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+bytes = "1.5"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Storage clients
+clickhouse = "0.11"
+redis = { version = "0.24", features = ["tokio-comp"] }
+
+[[bin]]
+name = "stream-processor"
+path = "src/main.rs"
