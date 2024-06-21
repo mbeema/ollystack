@@ -1,0 +1,182 @@
+# OllyStack Collector Configuration
+# This configuration sets up the complete observability pipeline
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Prometheus scraping (for self-monitoring and app metrics)
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'otel-collector'
+          scrape_interval: 10s
+          static_configs:
+            - targets: ['localhost:8888']
+
+  # Host metrics for infrastructure monitoring
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+      memory:
+      disk:
+      network:
+
+processors:
+  # OllyStack Correlation Processor - adds correlation_id to all signals
+  ollystack_correlation:
+    generate_if_missing: true
+    id_prefix: "olly"
+    extract_from_headers:
+      - X-Correlation-ID
+      - X-Request-ID
+      - x-correlation-id
+    extract_from_baggage: true
+    baggage_key: correlation_id
+    attribute_name: correlation_id
+    propagate_to_resource: true
+    derive_from_trace_id: true
+
+  # Batch processor for efficient export
+  batch:
+    timeout: 5s
+    send_batch_size: 1000
+    send_batch_max_size: 1500
+
+  # Memory limiter to prevent OOM
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 1000
+    spike_limit_mib: 200
+
+  # Resource processor to add common attributes
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: "${ENVIRONMENT:-development}"
+        action: upsert
+      - key: ollystack.collector.version
+        value: "0.1.0"
+        action: upsert
+
+  # Transform processor for data manipulation
+  transform:
+    trace_statements:
+      - context: span
+        statements:
+          # Ensure service.name is set
+          - set(resource.attributes["service.name"], "unknown") where resource.attributes["service.name"] == nil
+    log_statements:
+      - context: log
+        statements:
+          # Extract correlation_id from JSON body if present
+          - set(attributes["correlation_id"], body["correlation_id"]) where body["correlation_id"] != nil
+
+  # Tail sampling for intelligent trace retention
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 50000
+    expected_new_traces_per_sec: 100
+    policies:
+      # Always sample errors
+      - name: errors-policy
+        type: status_code
+        status_code: {status_codes: [ERROR]}
+      # Always sample slow traces (> 5s)
+      - name: latency-policy
+        type: latency
+        latency: {threshold_ms: 5000}
+      # Probabilistic sampling for normal traces
+      - name: probabilistic-policy
+        type: probabilistic
+        probabilistic: {sampling_percentage: 10}
+
+exporters:
+  # ClickHouse for traces
+  clickhouse:
+    endpoint: tcp://${CLICKHOUSE_HOST:-clickhouse}:9000
+    database: ollystack
+    username: ${CLICKHOUSE_USER:-default}
+    password: ${CLICKHOUSE_PASSWORD:-}
+    traces_table_name: traces
+    logs_table_name: logs
+    ttl: 720h  # 30 days
+    timeout: 30s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+  # Prometheus remote write for metrics
+  prometheusremotewrite:
+    endpoint: http://${PROMETHEUS_HOST:-prometheus}:9090/api/v1/write
+    tls:
+      insecure: true
+
+  # Debug exporter for development
+  debug:
+    verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+connectors:
+  # Generate metrics from spans (RED metrics)
+  spanmetrics:
+    histogram:
+      explicit:
+        buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s]
+    dimensions:
+      - name: http.method
+      - name: http.status_code
+      - name: service.name
+      - name: correlation_id
+    exemplars:
+      enabled: true
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  pprof:
+    endpoint: 0.0.0.0:1777
+
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, pprof, zpages]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, ollystack_correlation, resource, transform, tail_sampling, batch]
+      exporters: [clickhouse, spanmetrics]
+
+    # Metrics from spanmetrics connector
+    metrics/spanmetrics:
+      receivers: [spanmetrics]
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite]
+
+    metrics:
+      receivers: [otlp, prometheus, hostmetrics]
+      processors: [memory_limiter, ollystack_correlation, resource, batch]
+      exporters: [prometheusremotewrite]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, ollystack_correlation, resource, transform, batch]
+      exporters: [clickhouse]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: detailed
+      address: 0.0.0.0:8888
