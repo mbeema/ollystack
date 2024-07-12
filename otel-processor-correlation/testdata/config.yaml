@@ -1,0 +1,37 @@
+# OllyStack Correlation Processor Test Configuration
+
+processors:
+  ollystack_correlation:
+    # Generate correlation ID if not found in incoming data
+    generate_if_missing: true
+
+    # Prefix for generated correlation IDs
+    id_prefix: "olly"
+
+    # Headers to check for existing correlation ID
+    extract_from_headers:
+      - X-Correlation-ID
+      - X-Request-ID
+      - x-correlation-id
+      - x-request-id
+      - correlation-id
+      - request-id
+
+    # Extract from W3C baggage
+    extract_from_baggage: true
+    baggage_key: correlation_id
+
+    # Attribute name to store correlation ID
+    attribute_name: correlation_id
+
+    # Copy to resource attributes for consistent propagation
+    propagate_to_resource: true
+
+    # Use trace_id as seed for consistent correlation within a trace
+    derive_from_trace_id: true
+
+  # Alternative minimal config
+  ollystack_correlation/minimal:
+    generate_if_missing: true
+    id_prefix: "app"
+    attribute_name: correlation_id
