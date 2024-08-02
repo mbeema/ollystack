@@ -1,0 +1,36 @@
+# OllyStack Real-time Processor Configuration
+#
+# Sub-second alert evaluation from Kafka streams
+
+server:
+  metrics_port: 8890
+
+kafka:
+  brokers:
+    - kafka:9092
+  group_id: ollystack-realtime-processor
+  metrics_topic: ollystack-metrics
+  logs_topic: ollystack-logs
+  traces_topic: ollystack-traces
+  alerts_topic: ollystack-alerts
+
+redis:
+  address: redis:6379
+  password: ""
+  db: 0
+  max_retries: 3
+  pool_size: 10
+
+alerting:
+  alertmanager_url: http://alertmanager:9093
+  # webhook_url: https://your-webhook-endpoint.com/alerts
+  # slack_webhook: https://hooks.slack.com/services/...
+  # pagerduty_key: your-pagerduty-key
+  labels:
+    source: ollystack
+    environment: production
+
+rules:
+  rules_path: /etc/ollystack/rules
+  clickhouse_url: http://clickhouse:8123
+  evaluation_limit: 1000  # Max rules per second
