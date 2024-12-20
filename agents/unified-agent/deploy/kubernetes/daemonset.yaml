@@ -1,0 +1,334 @@
+# OllyStack Unified Agent - Kubernetes DaemonSet
+#
+# Deploy as a DaemonSet to collect metrics, logs, and traces from all nodes.
+#
+# Resource targets:
+# - Memory: 100MB limit (50MB request)
+# - CPU: 200m limit (50m request)
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ollystack
+  labels:
+    app.kubernetes.io/name: ollystack
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ollystack-agent
+  namespace: ollystack
+  labels:
+    app.kubernetes.io/name: ollystack-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ollystack-agent
+  labels:
+    app.kubernetes.io/name: ollystack-agent
+rules:
+  # Required for Kubernetes metadata enrichment
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "namespaces", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments", "daemonsets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ollystack-agent
+  labels:
+    app.kubernetes.io/name: ollystack-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ollystack-agent
+subjects:
+  - kind: ServiceAccount
+    name: ollystack-agent
+    namespace: ollystack
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ollystack-agent-config
+  namespace: ollystack
+  labels:
+    app.kubernetes.io/name: ollystack-agent
+data:
+  agent.yaml: |
+    agent:
+      hostname: ""  # Auto-detected
+      service_name: ollystack-agent
+      environment: ${OLLYSTACK_ENVIRONMENT:production}
+      health_port: 8888
+
+    metrics:
+      enabled: true
+      interval: 15s
+      collectors:
+        cpu: true
+        memory: true
+        disk: true
+        network: true
+        filesystem: true
+        process: false
+        container: true
+      container:
+        docker_socket: /var/run/docker.sock
+
+    logs:
+      enabled: true
+      sources:
+        - type: file
+          path: /var/log/pods/*/*.log
+          service: kubernetes
+          extract_trace_context: true
+      deduplication:
+        enabled: true
+        window: 60s
+        max_patterns: 10000
+
+    traces:
+      enabled: true
+      otlp:
+        grpc_port: 4317
+        http_port: 4318
+
+    aggregation:
+      enabled: true
+      window: 60s
+      metrics:
+        aggregates: [min, max, avg, count, p95]
+        drop_raw: true
+
+    sampling:
+      enabled: true
+      target_rate: 1048576
+      traces:
+        rate: 0.1
+        always_sample_errors: true
+        slow_threshold: 1s
+
+    cardinality:
+      enabled: true
+      max_series_per_metric: 10000
+      max_label_values:
+        pod: 5000
+        container: 1000
+
+    enrichment:
+      add_hostname: true
+      kubernetes:
+        enabled: true
+        include_labels: [app, version, team]
+      cloud:
+        enabled: true
+        provider: auto
+
+    export:
+      endpoint: ${OLLYSTACK_ENDPOINT}
+      use_grpc: true
+      auth:
+        api_key: ${OLLYSTACK_API_KEY:}
+      batch:
+        max_size: 1000
+        timeout: 5s
+      buffer:
+        enabled: true
+        path: /var/lib/ollystack-agent/buffer
+        max_size: 268435456
+
+    resources:
+      max_memory: 104857600
+      max_cpu: 0.5
+      max_procs: 2
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ollystack-agent
+  namespace: ollystack
+  labels:
+    app.kubernetes.io/name: ollystack-agent
+    app.kubernetes.io/component: agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ollystack-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ollystack-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8888"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: ollystack-agent
+
+      # Tolerate all taints to run on all nodes
+      tolerations:
+        - operator: Exists
+
+      # Use host network for better performance (optional)
+      # hostNetwork: true
+      # dnsPolicy: ClusterFirstWithHostNet
+
+      containers:
+        - name: agent
+          image: ollystack/unified-agent:latest
+          imagePullPolicy: IfNotPresent
+
+          args:
+            - "-c"
+            - "/etc/ollystack/agent.yaml"
+
+          env:
+            - name: OLLYSTACK_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: ollystack-agent-config
+                  key: endpoint
+                  optional: true
+            - name: OLLYSTACK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ollystack-agent-secrets
+                  key: api-key
+                  optional: true
+            - name: OLLYSTACK_ENVIRONMENT
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+              hostPort: 4317
+              protocol: TCP
+            - name: otlp-http
+              containerPort: 4318
+              hostPort: 4318
+              protocol: TCP
+            - name: health
+              containerPort: 8888
+              protocol: TCP
+
+          # Resource limits - lightweight!
+          resources:
+            requests:
+              cpu: 50m
+              memory: 50Mi
+            limits:
+              cpu: 200m
+              memory: 100Mi
+
+          # Probes
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 3
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+
+          # Security context
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ollystack
+              readOnly: true
+            - name: buffer
+              mountPath: /var/lib/ollystack-agent/buffer
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: varlibdockercontainers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+            - name: dockersock
+              mountPath: /var/run/docker.sock
+              readOnly: true
+
+      volumes:
+        - name: config
+          configMap:
+            name: ollystack-agent-config
+        - name: buffer
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: varlibdockercontainers
+          hostPath:
+            path: /var/lib/docker/containers
+        - name: dockersock
+          hostPath:
+            path: /var/run/docker.sock
+---
+# Service for OTLP endpoints (for other pods to send traces)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollystack-agent
+  namespace: ollystack
+  labels:
+    app.kubernetes.io/name: ollystack-agent
+spec:
+  type: ClusterIP
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: ollystack-agent
+---
+# Secret for API key (create separately)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ollystack-agent-secrets
+  namespace: ollystack
+type: Opaque
+stringData:
+  api-key: ""  # Set via: kubectl create secret generic ollystack-agent-secrets --from-literal=api-key=YOUR_KEY

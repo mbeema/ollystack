@@ -1,0 +1,296 @@
+# OllyStack Unified Agent Configuration
+#
+# This configuration is optimized for minimal resource usage
+# while providing comprehensive observability coverage.
+#
+# Target: <100MB memory, <2% CPU
+
+agent:
+  # Hostname override (auto-detected if empty)
+  hostname: ""
+
+  # Service name for self-telemetry
+  service_name: ollystack-agent
+
+  # Environment tag
+  environment: ${OLLYSTACK_ENVIRONMENT:production}
+
+  # Health check port
+  health_port: 8888
+
+  # Custom tags added to all telemetry
+  tags:
+    team: ${TEAM:platform}
+
+# =============================================================================
+# METRICS COLLECTION
+# =============================================================================
+metrics:
+  enabled: true
+
+  # Collection interval (minimum: 5s, recommended: 15-60s)
+  interval: 15s
+
+  # Enable/disable specific collectors
+  collectors:
+    cpu: true
+    memory: true
+    disk: true
+    network: true
+    filesystem: true
+    process: false      # Disabled by default (high overhead)
+    container: true
+
+  # Process monitoring (if enabled)
+  process:
+    # Only track processes matching these patterns
+    include: []
+    # Exclude processes matching these patterns
+    exclude:
+      - "kworker/*"
+      - "migration/*"
+    # Max processes to track
+    max_processes: 50
+
+  # Container monitoring
+  container:
+    docker_socket: /var/run/docker.sock
+    include_labels:
+      - app
+      - version
+      - environment
+
+# =============================================================================
+# LOG COLLECTION
+# =============================================================================
+logs:
+  enabled: true
+
+  # Log sources to collect
+  sources:
+    # Application logs
+    - type: file
+      path: /var/log/app/*.log
+      service: app
+      parse_json: true
+      extract_trace_context: true
+
+    # System logs
+    - type: file
+      path: /var/log/syslog
+      service: system
+      extract_trace_context: false
+
+    # Docker container logs (alternative to file)
+    # - type: docker
+    #   service: containers
+
+    # Journald (systemd)
+    # - type: journald
+    #   service: system
+
+  # Pattern deduplication - MAJOR bandwidth savings
+  deduplication:
+    enabled: true
+    window: 60s
+    max_patterns: 10000
+
+  # Multi-line log handling
+  multiline:
+    # Pattern to detect start of new log entry
+    pattern: '^\d{4}-\d{2}-\d{2}'
+    max_lines: 100
+
+# =============================================================================
+# TRACE COLLECTION
+# =============================================================================
+traces:
+  enabled: true
+
+  # OTLP receiver for traces from applications
+  otlp:
+    grpc_port: 4317
+    http_port: 4318
+
+  # Beyla eBPF integration for auto-instrumentation
+  beyla:
+    enabled: false  # Enable if running with CAP_SYS_ADMIN
+    binary_path: ""
+    config_path: /etc/ollystack/beyla.yaml
+
+# =============================================================================
+# LOCAL AGGREGATION - KEY EFFICIENCY FEATURE
+# =============================================================================
+aggregation:
+  enabled: true
+
+  # Aggregation window (data is aggregated over this period)
+  window: 60s
+
+  # Metric aggregation settings
+  metrics:
+    # Compute these aggregates per metric
+    aggregates:
+      - min
+      - max
+      - avg
+      - count
+      - p50
+      - p95
+      - p99
+
+    # Drop individual data points after aggregation
+    # Reduces data volume by 60x (1 point/min vs 1 point/sec)
+    drop_raw: true
+
+  # Log aggregation settings
+  logs:
+    # Group similar logs and report count
+    group_similar: true
+    similarity_threshold: 0.9
+
+# =============================================================================
+# ADAPTIVE SAMPLING
+# =============================================================================
+sampling:
+  enabled: true
+
+  # Target data rate (bytes/second)
+  # Agent automatically adjusts sampling to stay under this
+  target_rate: 1048576  # 1MB/s
+
+  # Trace sampling
+  traces:
+    # Base sampling rate (0.0-1.0)
+    rate: 0.1  # 10% by default
+
+    # Always sample errors regardless of rate
+    always_sample_errors: true
+
+    # Always sample requests slower than this threshold
+    slow_threshold: 1s
+
+    # Boost sampling for new/rare operations
+    rare_operation_boost: 5.0
+
+  # Log sampling
+  logs:
+    # Sampling rate for INFO level logs
+    info_rate: 0.1
+
+    # Sampling rate for DEBUG level logs
+    debug_rate: 0.01
+
+    # Always keep ERROR and above
+    always_keep_errors: true
+
+# =============================================================================
+# CARDINALITY CONTROL - COST PROTECTION
+# =============================================================================
+cardinality:
+  enabled: true
+
+  # Max unique time series per metric name
+  max_series_per_metric: 10000
+
+  # Max unique values per label (0 = never use as label)
+  max_label_values:
+    user_id: 0       # Never use high-cardinality IDs as labels
+    request_id: 0
+    session_id: 0
+    trace_id: 0
+    span_id: 0
+    endpoint: 1000   # Limit endpoint cardinality
+    path: 500
+    status_code: 100
+
+  # Labels to always drop (security/PII)
+  drop_labels:
+    - password
+    - token
+    - secret
+    - key
+    - authorization
+    - cookie
+
+  # Alert when cardinality exceeds this threshold
+  alert_threshold: 5000
+
+# =============================================================================
+# ENRICHMENT
+# =============================================================================
+enrichment:
+  # Add hostname to all telemetry
+  add_hostname: true
+
+  # Kubernetes metadata enrichment
+  kubernetes:
+    enabled: true
+    include_labels:
+      - app
+      - version
+      - team
+    include_annotations:
+      - prometheus.io/scrape
+
+  # Cloud provider metadata
+  cloud:
+    enabled: true
+    provider: auto  # auto, aws, azure, gcp
+
+  # Static tags added to everything
+  static_tags: {}
+
+# =============================================================================
+# EXPORT
+# =============================================================================
+export:
+  # OTLP endpoint (your OTel Collector or OllyStack backend)
+  endpoint: ${OLLYSTACK_ENDPOINT:localhost:4317}
+
+  # Use gRPC (true) or HTTP (false)
+  use_grpc: true
+
+  # TLS configuration
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+    ca_file: ""
+    skip_verify: false
+
+  # Authentication
+  auth:
+    api_key: ${OLLYSTACK_API_KEY:}
+    bearer_token: ""
+
+  # Batching
+  batch:
+    max_size: 1000
+    timeout: 5s
+
+  # Retry configuration
+  retry:
+    enabled: true
+    max_attempts: 5
+    initial_wait: 1s
+    max_wait: 30s
+
+  # Disk buffer for reliability during outages
+  buffer:
+    enabled: true
+    path: /var/lib/ollystack-agent/buffer
+    max_size: 268435456  # 256MB
+
+# =============================================================================
+# RESOURCE LIMITS
+# =============================================================================
+resources:
+  # Max memory usage (0 = no limit)
+  max_memory: 104857600  # 100MB
+
+  # Max CPU usage (0 = no limit)
+  max_cpu: 0.5  # 50% of one core
+
+  # GOMAXPROCS setting
+  max_procs: 2

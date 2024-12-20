@@ -1,0 +1,78 @@
+# Grafana Beyla Configuration for eBPF Auto-instrumentation
+#
+# Beyla provides zero-code instrumentation using eBPF.
+# This configuration is designed to work with the OllyStack Unified Agent.
+#
+# Requirements:
+# - Linux kernel 5.8+
+# - CAP_SYS_ADMIN capability (or run as root)
+
+# What to instrument
+open_port: 80,443,3000,8080,8000,9000
+
+# OR specify by executable name
+# executable_name: "myapp"
+
+# Service identification
+service:
+  # Namespace for service discovery
+  namespace: default
+
+# eBPF settings
+ebpf:
+  # Enable HTTP tracing
+  http:
+    enabled: true
+    # Capture request/response headers
+    capture_headers: true
+
+  # Enable gRPC tracing
+  grpc:
+    enabled: true
+
+  # Enable SQL query tracing
+  sql:
+    enabled: true
+    # Sanitize queries (remove values)
+    sanitize: true
+
+  # Enable Redis command tracing
+  redis:
+    enabled: true
+
+  # Enable Kafka tracing
+  kafka:
+    enabled: true
+
+# OTLP export to OllyStack Agent
+otel_traces_export:
+  endpoint: http://localhost:4317
+  protocol: grpc
+  # Batch settings
+  batch_timeout: 5s
+  export_timeout: 30s
+
+otel_metrics_export:
+  endpoint: http://localhost:4317
+  protocol: grpc
+  interval: 15s
+
+# Sampling
+sampling:
+  # Probability sampling rate (0.0-1.0)
+  rate: 0.1
+
+# Resource attributes
+attributes:
+  kubernetes:
+    enabled: true
+  host_id:
+    enabled: true
+
+# Logging
+log_level: info
+
+# Internal metrics
+internal_metrics:
+  enabled: true
+  port: 6060
