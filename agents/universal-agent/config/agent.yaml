@@ -1,0 +1,113 @@
+# OllyStack Universal Agent Configuration
+# Documentation: https://docs.ollystack.io/agents/universal-agent
+
+collector:
+  # OTLP collector endpoint
+  endpoint: "ollystack-collector:4317"
+
+  # Disable TLS for development (enable in production)
+  insecure: true
+
+  # Compression: none, gzip
+  compression: gzip
+
+  # Export timeout
+  timeout: 30s
+
+  # Retry configuration
+  retry:
+    enabled: true
+    max_attempts: 5
+    initial_wait: 1s
+    max_wait: 30s
+
+metrics:
+  # Enable metrics collection
+  enabled: true
+
+  # Collection interval
+  interval: 10s
+
+  # Enabled collectors
+  collectors:
+    cpu: true
+    memory: true
+    disk: true
+    network: true
+    process: true
+    container: true
+    filesystem: true
+    load: true
+
+logs:
+  # Enable log collection
+  enabled: true
+
+  # Log file paths (glob patterns supported)
+  paths:
+    - /var/log/*.log
+    - /var/log/syslog
+    - /var/log/messages
+    - /var/log/containers/*.log
+
+  # Exclude patterns
+  exclude:
+    - /var/log/*.gz
+    - /var/log/*.[0-9]
+
+  # Multiline log handling
+  multiline:
+    enabled: false
+    pattern: "^\\d{4}-\\d{2}-\\d{2}"
+    negate: true
+    match: after
+
+  # Journald collection (Linux)
+  journald:
+    enabled: true
+    units: []
+
+  # Windows Event Log collection
+  windows_event_log:
+    enabled: false
+    channels:
+      - Application
+      - System
+      - Security
+
+discovery:
+  # Enable auto-discovery
+  enabled: true
+
+  # Kubernetes discovery
+  kubernetes: true
+
+  # Docker discovery
+  docker: true
+
+  # Process discovery
+  process: true
+
+resource:
+  # Custom resource attributes
+  attributes:
+    environment: production
+    # service.name: my-service
+    # service.version: 1.0.0
+
+  # Cloud metadata detection
+  cloud:
+    enabled: true
+    provider: auto  # auto, aws, azure, gcp
+
+agent:
+  # Hostname override (leave empty for auto-detection)
+  hostname: ""
+
+  # Log level: debug, info, warn, error
+  log_level: info
+
+  # Healthcheck endpoint
+  healthcheck:
+    enabled: true
+    address: ":8888"
