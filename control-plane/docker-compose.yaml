@@ -1,0 +1,180 @@
+# OllyStack Control Plane - Full Architecture
+# Components:
+#   - OpAMP Server (central config management)
+#   - Gateway Collector (aggregation with OpAMP)
+#   - Agent Collector (per-node, with OpAMP)
+#   - Optional: Grafana Beyla (eBPF for true zero-code instrumentation)
+
+version: '3.8'
+
+services:
+  # =============================================================================
+  # CONTROL PLANE
+  # =============================================================================
+
+  # OpAMP Server - Central Configuration Management
+  opamp-server:
+    build:
+      context: ./opamp-server
+      dockerfile: Dockerfile
+    container_name: ollystack-opamp-server
+    restart: unless-stopped
+    ports:
+      - "4320:4320"  # OpAMP WebSocket + REST API
+    environment:
+      - HTTP_PORT=4320
+      - REDIS_URL=redis://redis:6379
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:4320/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+    depends_on:
+      - redis
+
+  # Redis - Config store and caching
+  redis:
+    image: redis:7-alpine
+    container_name: ollystack-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+
+  # =============================================================================
+  # DATA PLANE - COLLECTORS
+  # =============================================================================
+
+  # Gateway Collector - Central aggregation point
+  gateway-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    container_name: ollystack-gateway-collector
+    restart: unless-stopped
+    user: "0:0"
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Prometheus metrics
+      - "13133:13133" # Health check
+    environment:
+      - COLLECTOR_INSTANCE_ID=gateway-collector-001
+      - DEPLOYMENT_ENV=production
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-changeme}
+    volumes:
+      - ./config/otel-collector-opamp.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    logging:
+      driver: "none"  # Prevent feedback loop
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:13133/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+    depends_on:
+      opamp-server:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+  # Agent Collector - Per-node collection (can be replicated)
+  agent-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    container_name: ollystack-agent-collector
+    restart: unless-stopped
+    user: "0:0"
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    environment:
+      - COLLECTOR_INSTANCE_ID=agent-collector-001
+      - DEPLOYMENT_ENV=production
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-changeme}
+    volumes:
+      - ./config/otel-collector-opamp.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    logging:
+      driver: "none"
+    networks:
+      - ollystack
+    depends_on:
+      opamp-server:
+        condition: service_healthy
+
+  # =============================================================================
+  # eBPF INSTRUMENTATION (Optional - for true zero-code Go/Rust/C++)
+  # =============================================================================
+
+  # Grafana Beyla - eBPF-based auto-instrumentation
+  # Uncomment to enable zero-code instrumentation for Go services
+  beyla:
+    image: grafana/beyla:latest
+    container_name: ollystack-beyla
+    restart: unless-stopped
+    privileged: true
+    pid: "host"
+    environment:
+      # Target services by executable name or port
+      - BEYLA_OPEN_PORT=8080-8090
+      - BEYLA_SERVICE_NAMESPACE=ollystack
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://gateway-collector:4317
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - BEYLA_PRINT_TRACES=false
+      - BEYLA_LOG_LEVEL=INFO
+      # Metrics configuration
+      - BEYLA_PROMETHEUS_PORT=9090
+      - BEYLA_INTERNAL_METRICS_PROMETHEUS_PORT=6060
+    volumes:
+      - /sys/kernel/security:/sys/kernel/security:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+    networks:
+      - ollystack
+    depends_on:
+      - gateway-collector
+    profiles:
+      - ebpf  # Only start with --profile ebpf
+
+  # =============================================================================
+  # STORAGE
+  # =============================================================================
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.1
+    container_name: ollystack-clickhouse
+    restart: unless-stopped
+    ports:
+      - "8123:8123"  # HTTP
+      - "9000:9000"  # Native
+    environment:
+      - CLICKHOUSE_USER=ollystack
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-changeme}
+      - CLICKHOUSE_DB=ollystack
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./config/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+
+networks:
+  ollystack:
+    name: ollystack
+    driver: bridge
+
+volumes:
+  redis-data:
+  clickhouse-data:

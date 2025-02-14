@@ -1,0 +1,338 @@
+# Advanced OpenTelemetry Processors Demo
+# This configuration demonstrates various OTel processors for learning purposes
+#
+# Processors included:
+# 1. attributes - Add/Update/Delete/Hash attributes
+# 2. resource - Modify resource attributes
+# 3. transform - OTTL transformations
+# 4. filter - Include/Exclude data
+# 5. tail_sampling - Intelligent trace sampling
+# 6. span - Modify span names
+# 7. groupbyattrs - Group metrics by attributes
+# 8. metricstransform - Rename/aggregate metrics
+# 9. probabilistic_sampler - Percentage sampling
+# 10. routing - Route to different exporters
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # =============================================================================
+  # 1. ATTRIBUTES PROCESSOR - Add/Update/Delete/Hash attributes
+  # Docs: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/attributesprocessor
+  # =============================================================================
+  attributes/add_env:
+    actions:
+      # Add static attributes
+      - key: deployment.environment
+        value: production
+        action: insert
+      # Add attribute from environment variable
+      - key: k8s.cluster.name
+        value: ${CLUSTER_NAME}
+        action: insert
+      # Hash sensitive data (PII protection)
+      - key: user.email
+        action: hash
+      # Delete unwanted attributes
+      - key: internal.debug
+        action: delete
+      # Extract value from another attribute
+      - key: http.route
+        from_attribute: http.target
+        action: upsert
+
+  # =============================================================================
+  # 2. RESOURCE PROCESSOR - Modify resource attributes
+  # Docs: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/resourceprocessor
+  # =============================================================================
+  resource/add_metadata:
+    attributes:
+      - key: service.version
+        value: "2.0.0"
+        action: upsert
+      - key: telemetry.sdk.language
+        from_attribute: service.language
+        action: insert
+      - key: cloud.provider
+        value: aws
+        action: insert
+      - key: cloud.region
+        value: us-east-1
+        action: insert
+
+  # =============================================================================
+  # 3. TRANSFORM PROCESSOR - Powerful OTTL transformations
+  # Docs: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/transformprocessor
+  # OTTL Reference: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/pkg/ottl
+  # =============================================================================
+  transform/traces:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          # Add span duration as attribute (nanoseconds to milliseconds)
+          - set(attributes["span.duration_ms"], (end_time_unix_nano - start_time_unix_nano) / 1000000)
+          # Mark slow spans (>500ms)
+          - set(attributes["span.is_slow"], true) where (end_time_unix_nano - start_time_unix_nano) > 500000000
+          # Normalize HTTP status codes into classes
+          - set(attributes["http.status_class"], "2xx") where attributes["http.status_code"] >= 200 and attributes["http.status_code"] < 300
+          - set(attributes["http.status_class"], "4xx") where attributes["http.status_code"] >= 400 and attributes["http.status_code"] < 500
+          - set(attributes["http.status_class"], "5xx") where attributes["http.status_code"] >= 500
+          # Extract service tier from service name pattern
+          - set(attributes["service.tier"], "frontend") where IsMatch(resource.attributes["service.name"], ".*-ui$|.*-web$|.*-gateway$")
+          - set(attributes["service.tier"], "backend") where IsMatch(resource.attributes["service.name"], ".*-service$|.*-api$")
+          # Truncate long attribute values to prevent storage bloat
+          - truncate_all(attributes, 256)
+
+  transform/metrics:
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        statements:
+          # Add timestamp bucket for time-based aggregation (1-minute buckets)
+          - set(attributes["time_bucket"], UnixSeconds(time) - (UnixSeconds(time) % 60))
+          # Flag high CPU usage for alerting
+          - set(attributes["cpu.alert"], "high") where metric.name == "system.cpu.utilization" and value > 0.8
+
+  transform/logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          # Parse JSON body if present and merge into attributes
+          - merge_maps(attributes, ParseJSON(body), "insert") where IsMatch(body, "^\\{.*\\}$")
+          # Extract and normalize log severity from message content
+          - set(severity_number, 9) where IsMatch(body, "(?i)info")
+          - set(severity_number, 13) where IsMatch(body, "(?i)warn")
+          - set(severity_number, 17) where IsMatch(body, "(?i)error")
+          - set(severity_number, 21) where IsMatch(body, "(?i)fatal|critical")
+          # Add correlation ID from trace context for log-trace correlation
+          - set(attributes["correlation_id"], trace_id.string) where trace_id != nil
+
+  # =============================================================================
+  # 4. FILTER PROCESSOR - Include/Exclude data
+  # Docs: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/filterprocessor
+  # =============================================================================
+  filter/traces:
+    error_mode: ignore
+    traces:
+      span:
+        # Exclude health checks and readiness probes (noisy, not useful)
+        - attributes["http.route"] == "/health"
+        - attributes["http.route"] == "/ready"
+        - attributes["http.route"] == "/metrics"
+        - IsMatch(attributes["http.user_agent"], "(?i)kube-probe|health-check")
+        # Exclude internal/debug spans
+        - attributes["internal"] == true
+
+  filter/metrics:
+    error_mode: ignore
+    metrics:
+      # Exclude noisy/unwanted metrics
+      metric:
+        - name == "process.runtime.go.gc.pause_ns"
+        # Remove infinity buckets from histograms (usually not useful)
+        - IsMatch(name, ".*_bucket$") and attributes["le"] == "+Inf"
+
+  filter/logs:
+    error_mode: ignore
+    logs:
+      # Exclude debug logs in production
+      log_record:
+        - severity_number < 9
+        - IsMatch(body, "(?i)^debug:")
+
+  # =============================================================================
+  # 5. TAIL SAMPLING PROCESSOR - Intelligent trace sampling
+  # Docs: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/tailsamplingprocessor
+  #
+  # This is crucial for high-volume systems - keeps important traces, samples the rest
+  # =============================================================================
+  tail_sampling:
+    decision_wait: 10s              # Wait for complete trace before deciding
+    num_traces: 50000               # Max traces to hold in memory
+    expected_new_traces_per_sec: 1000
+    policies:
+      # Policy 1: Always sample errors (100%)
+      - name: errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+
+      # Policy 2: Always sample slow traces (>1s)
+      - name: slow-traces
+        type: latency
+        latency:
+          threshold_ms: 1000
+
+      # Policy 3: Sample 100% of critical services
+      - name: critical-services
+        type: string_attribute
+        string_attribute:
+          key: service.name
+          values: [payment-service, order-service]
+
+      # Policy 4: Probabilistic sampling for normal traces (10%)
+      - name: probabilistic
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+      # Policy 5: Rate limiting fallback to prevent overload
+      - name: rate-limit
+        type: rate_limiting
+        rate_limiting:
+          spans_per_second: 100
+
+  # =============================================================================
+  # 6. SPAN PROCESSOR - Modify span names and attributes
+  # Docs: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/spanprocessor
+  # =============================================================================
+  span:
+    name:
+      # Normalize span names to reduce cardinality
+      # Instead of "GET /users/123" -> "GET /users/{id}"
+      from_attributes: [http.method, http.route]
+      separator: " "
+    status:
+      # Set error status based on conditions
+      code: Error
+      description: "HTTP error"
+
+  # =============================================================================
+  # 7. GROUPBYATTRS PROCESSOR - Group metrics by attributes
+  # Docs: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/groupbyattrsprocessor
+  #
+  # Useful for reducing metric cardinality and organizing data
+  # =============================================================================
+  groupbyattrs:
+    keys:
+      - service.name
+      - deployment.environment
+      - host.name
+
+  # =============================================================================
+  # 8. METRICS TRANSFORM PROCESSOR - Rename/aggregate metrics
+  # Docs: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/metricstransformprocessor
+  # =============================================================================
+  metricstransform:
+    transforms:
+      # Rename metric for consistency
+      - include: system.cpu.time
+        action: update
+        new_name: cpu.time.total
+
+      # Aggregate labels to reduce cardinality
+      - include: http.server.duration
+        action: update
+        operations:
+          - action: aggregate_labels
+            aggregation_type: sum
+            label_set: [http.method, http.status_code]
+
+      # Add label to all process metrics
+      - include: ^process\..*
+        match_type: regexp
+        action: update
+        operations:
+          - action: add_label
+            new_label: process.monitored
+            new_value: "true"
+
+  # =============================================================================
+  # 9. PROBABILISTIC SAMPLER - Simple percentage sampling
+  # Docs: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/probabilisticsamplerprocessor
+  #
+  # Simpler than tail_sampling but doesn't consider trace completeness
+  # =============================================================================
+  probabilistic_sampler:
+    sampling_percentage: 25
+    hash_seed: 22
+
+  # =============================================================================
+  # 10. ROUTING PROCESSOR - Route to different exporters
+  # Docs: https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/routingprocessor
+  #
+  # Useful for multi-tenant or tiered storage scenarios
+  # =============================================================================
+  routing:
+    from_attribute: service.tier
+    default_exporters: [otlp/default]
+    table:
+      - value: critical
+        exporters: [otlp/primary, otlp/backup]
+      - value: frontend
+        exporters: [otlp/frontend]
+
+  # =============================================================================
+  # Standard processors (always recommended)
+  # =============================================================================
+  batch:
+    timeout: 5s
+    send_batch_size: 8192
+    send_batch_max_size: 16384
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 1024
+    spike_limit_mib: 256
+
+exporters:
+  otlp/default:
+    endpoint: collector:4317
+    tls:
+      insecure: true
+
+  # Example: Multiple exporters for routing
+  # otlp/primary:
+  #   endpoint: primary-collector:4317
+  # otlp/backup:
+  #   endpoint: backup-collector:4317
+  # otlp/frontend:
+  #   endpoint: frontend-collector:4317
+
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - resource/add_metadata
+        - attributes/add_env
+        - transform/traces
+        - filter/traces
+        - tail_sampling
+        - span
+        - batch
+      exporters: [otlp/default]
+
+    metrics:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - resource/add_metadata
+        - transform/metrics
+        - filter/metrics
+        - groupbyattrs
+        - metricstransform
+        - batch
+      exporters: [otlp/default]
+
+    logs:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - resource/add_metadata
+        - transform/logs
+        - filter/logs
+        - batch
+      exporters: [otlp/default]
