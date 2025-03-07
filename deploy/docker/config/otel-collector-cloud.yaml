@@ -1,0 +1,158 @@
+# OpenTelemetry Collector Configuration for ClickHouse Cloud
+# This config receives telemetry data and exports to managed ClickHouse
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "*"
+          allowed_headers:
+            - "*"
+
+  # Prometheus scraping for self-monitoring
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'otel-collector'
+          scrape_interval: 30s
+          static_configs:
+            - targets: ['localhost:8888']
+
+  # Host metrics from the collector machine
+  hostmetrics:
+    collection_interval: 60s
+    scrapers:
+      cpu:
+      memory:
+      disk:
+      network:
+
+processors:
+  # Batch processing for efficiency
+  batch:
+    timeout: 5s
+    send_batch_size: 10000
+    send_batch_max_size: 20000
+
+  # Memory limiter to prevent OOM
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 1024
+    spike_limit_mib: 256
+
+  # Resource detection
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 5s
+    override: false
+
+  # Add attributes
+  attributes:
+    actions:
+      - key: ollystack.collector.version
+        value: "1.0.0"
+        action: upsert
+      - key: deployment.environment
+        value: ${env:DEPLOYMENT_ENV:-development}
+        action: upsert
+
+  # Tail-based sampling for traces (keep errors, sample normal)
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 100000
+    expected_new_traces_per_sec: 1000
+    policies:
+      # Always keep errors
+      - name: errors-policy
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      # Always keep slow traces (>1s)
+      - name: latency-policy
+        type: latency
+        latency:
+          threshold_ms: 1000
+      # Sample normal traces at 10%
+      - name: probabilistic-policy
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+exporters:
+  # ClickHouse Cloud exporter for traces
+  clickhouse:
+    endpoint: tcp://${env:CLICKHOUSE_HOST}:${env:CLICKHOUSE_PORT}
+    database: ${env:CLICKHOUSE_DATABASE}
+    username: ${env:CLICKHOUSE_USER}
+    password: ${env:CLICKHOUSE_PASSWORD}
+    ttl: 72h
+    compress: lz4
+    create_schema: true
+    logs_table_name: otel_logs
+    traces_table_name: otel_traces
+    metrics_table_name: otel_metrics
+    timeout: 30s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 10000
+
+  # Debug logging (disable in production)
+  debug:
+    verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+  # Prometheus exporter for collector metrics
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: ollystack
+    const_labels:
+      service: otel-collector
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+    path: /health
+
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+  pprof:
+    endpoint: 0.0.0.0:1777
+
+service:
+  extensions: [health_check, zpages, pprof]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, attributes, tail_sampling, batch]
+      exporters: [clickhouse]
+
+    metrics:
+      receivers: [otlp, prometheus, hostmetrics]
+      processors: [memory_limiter, resourcedetection, attributes, batch]
+      exporters: [clickhouse, prometheus]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, attributes, batch]
+      exporters: [clickhouse]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888
+      level: detailed

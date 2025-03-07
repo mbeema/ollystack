@@ -1,0 +1,163 @@
+# Vector Configuration for Log Collection
+# High-performance log shipping to OTel Collector
+
+# =============================================================================
+# Data Directory
+# =============================================================================
+data_dir = "/var/lib/vector"
+
+# =============================================================================
+# Sources
+# =============================================================================
+
+# Collect from Docker containers
+[sources.docker_logs]
+type = "docker_logs"
+docker_host = "unix:///var/run/docker.sock"
+
+# Collect from files
+[sources.file_logs]
+type = "file"
+include = ["/var/log/**/*.log"]
+exclude = ["/var/log/**/*.gz", "/var/log/**/*.[0-9]"]
+read_from = "beginning"
+
+# Collect from journald (Linux systemd)
+[sources.journald_logs]
+type = "journald"
+current_boot_only = true
+
+# =============================================================================
+# Transforms
+# =============================================================================
+
+# Parse and enrich Docker logs
+[transforms.parse_docker]
+type = "remap"
+inputs = ["docker_logs"]
+source = '''
+# Try to parse as JSON
+parsed, err = parse_json(.message)
+if err == null {
+  . = merge(., parsed)
+}
+
+# Extract container info
+.container_name = .container_name
+.container_id = .container_id
+
+# Map to OTel semantic conventions
+.attributes.container.name = .container_name
+.attributes.container.id = .container_id
+
+# Try to extract trace context from log message
+trace_match = parse_regex(.message, r'trace_id[=:]?\s*(?P<trace_id>[a-f0-9]{32})')
+if trace_match != null {
+  .trace_id = trace_match.trace_id
+}
+
+span_match = parse_regex(.message, r'span_id[=:]?\s*(?P<span_id>[a-f0-9]{16})')
+if span_match != null {
+  .span_id = span_match.span_id
+}
+
+# Detect severity
+.severity = if contains(string!(.message), "FATAL") || contains(string!(.message), "fatal") {
+  "FATAL"
+} else if contains(string!(.message), "ERROR") || contains(string!(.message), "error") {
+  "ERROR"
+} else if contains(string!(.message), "WARN") || contains(string!(.message), "warn") {
+  "WARN"
+} else if contains(string!(.message), "DEBUG") || contains(string!(.message), "debug") {
+  "DEBUG"
+} else {
+  "INFO"
+}
+
+# Map severity to OTel severity number
+.severity_number = if .severity == "FATAL" {
+  21
+} else if .severity == "ERROR" {
+  17
+} else if .severity == "WARN" {
+  13
+} else if .severity == "DEBUG" {
+  5
+} else {
+  9
+}
+'''
+
+# Parse file logs
+[transforms.parse_files]
+type = "remap"
+inputs = ["file_logs"]
+source = '''
+# Add file path as attribute
+.attributes.log.file.path = .file
+
+# Try to parse as JSON
+parsed, err = parse_json(.message)
+if err == null {
+  . = merge(., parsed)
+}
+
+# Detect severity
+.severity = if contains(string!(.message), "ERROR") {
+  "ERROR"
+} else if contains(string!(.message), "WARN") {
+  "WARN"
+} else {
+  "INFO"
+}
+'''
+
+# Filter out noisy logs
+[transforms.filter_logs]
+type = "filter"
+inputs = ["parse_docker", "parse_files", "journald_logs"]
+condition = '''
+# Filter out health check logs
+!contains(string!(.message), "GET /health") &&
+!contains(string!(.message), "GET /ready") &&
+# Filter out empty messages
+length(string!(.message)) > 0
+'''
+
+# =============================================================================
+# Sinks
+# =============================================================================
+
+# Send to OTel Collector via OTLP
+[sinks.otlp]
+type = "opentelemetry"
+inputs = ["filter_logs"]
+endpoint = "http://otel-collector:4317"
+protocol = "grpc"
+compression = "gzip"
+
+[sinks.otlp.batch]
+max_bytes = 10485760
+max_events = 10000
+timeout_secs = 10
+
+[sinks.otlp.buffer]
+type = "disk"
+max_size = 268435488  # 256MB
+when_full = "block"
+
+# Console output for debugging (disable in production)
+[sinks.console]
+type = "console"
+inputs = ["filter_logs"]
+encoding.codec = "json"
+# Uncomment to enable: only shows sampled logs
+# target = "stdout"
+
+# =============================================================================
+# Health & Metrics
+# =============================================================================
+
+[api]
+enabled = true
+address = "0.0.0.0:8686"

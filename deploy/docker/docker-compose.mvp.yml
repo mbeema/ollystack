@@ -1,0 +1,151 @@
+# OllyStack MVP - Using Managed ClickHouse Cloud
+#
+# This setup uses ClickHouse Cloud for storage, reducing operational complexity.
+#
+# Prerequisites:
+# 1. Create a ClickHouse Cloud account at https://clickhouse.cloud
+# 2. Create a service and get your connection details
+# 3. Copy .env.example to .env and fill in your credentials
+#
+# Usage:
+#   docker-compose -f docker-compose.mvp.yml up -d
+#
+# Estimated Cost:
+#   - ClickHouse Cloud: ~$50-200/month (depending on usage)
+#   - Compute (local/VPS): ~$50-100/month
+#   - Total MVP: ~$100-300/month
+
+services:
+  # =============================================================================
+  # API Gateway & Backend
+  # =============================================================================
+  api-server:
+    build:
+      context: ../../api-server
+      dockerfile: Dockerfile
+    image: ollystack/api-server:latest
+    container_name: ollystack-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - SERVER_PORT=8080
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # ClickHouse Cloud Connection
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-9440}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-ollystack}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_SECURE=true
+      # JWT Auth
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+      - JWT_EXPIRY=24h
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+    depends_on:
+      - collector
+
+  # =============================================================================
+  # OpenTelemetry Collector
+  # =============================================================================
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    container_name: ollystack-collector
+    restart: unless-stopped
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Prometheus metrics (self)
+      - "8889:8889"   # Prometheus exporter
+      - "13133:13133" # Health check
+      - "55679:55679" # zpages
+    volumes:
+      - ./config/otel-collector-cloud.yaml:/etc/otelcol-contrib/config.yaml:ro
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    environment:
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-9440}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-ollystack}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:13133/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+
+  # =============================================================================
+  # Web UI
+  # =============================================================================
+  web-ui:
+    build:
+      context: ../../web-ui
+      dockerfile: Dockerfile
+    image: ollystack/web-ui:latest
+    container_name: ollystack-web
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    environment:
+      - API_URL=/api
+      - AI_ENGINE_URL=/ai
+    depends_on:
+      - api-server
+    networks:
+      - ollystack
+
+  # =============================================================================
+  # Redis (for caching & sessions)
+  # =============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: ollystack-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+
+  # =============================================================================
+  # Nginx Reverse Proxy (Optional - for production)
+  # =============================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: ollystack-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - web-ui
+      - api-server
+    networks:
+      - ollystack
+    profiles:
+      - production
+
+networks:
+  ollystack:
+    driver: bridge
+
+volumes:
+  redis_data:

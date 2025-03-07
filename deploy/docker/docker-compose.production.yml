@@ -1,0 +1,331 @@
+# OllyStack Production Architecture
+#
+# Kafka-backed architecture for millions of customers:
+# Agent → Ingestion Gateway → Kafka → Consumers → ClickHouse
+#
+# Components:
+# - Kafka: Durability backbone (never lose data)
+# - Ingestion Gateway: OTLP receiver, rate limiting, writes to Kafka
+# - Storage Consumer: Batch writes to ClickHouse
+# - Real-time Processor: Sub-second alert evaluation
+# - ClickHouse: Analytics storage
+# - Redis: State management for real-time processing
+# - AlertManager: Alert routing and deduplication
+#
+# Run: docker-compose -f docker-compose.production.yml up -d
+
+version: '3.8'
+
+services:
+  # ============================================================================
+  # Message Queue - Durability Backbone
+  # ============================================================================
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.3
+    container_name: ollystack-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    container_name: ollystack-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_NUM_PARTITIONS: 32
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      # Retention settings
+      KAFKA_LOG_RETENTION_HOURS: 168  # 7 days
+      KAFKA_LOG_RETENTION_BYTES: 10737418240  # 10GB per partition
+      # Performance tuning
+      KAFKA_COMPRESSION_TYPE: lz4
+      KAFKA_MESSAGE_MAX_BYTES: 1048576  # 1MB
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # Create Kafka topics on startup
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.3
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      echo 'Creating Kafka topics...'
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic ollystack-metrics --partitions 32 --replication-factor 1 --config retention.ms=604800000
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic ollystack-logs --partitions 32 --replication-factor 1 --config retention.ms=259200000
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic ollystack-traces --partitions 32 --replication-factor 1 --config retention.ms=259200000
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic ollystack-alerts --partitions 8 --replication-factor 1 --config retention.ms=2592000000
+      echo 'Topics created successfully'
+      "
+
+  # ============================================================================
+  # Storage Layer
+  # ============================================================================
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.1
+    container_name: ollystack-clickhouse
+    ports:
+      - "8123:8123"  # HTTP
+      - "9000:9000"  # Native
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./config/clickhouse/init-minimal.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      CLICKHOUSE_DB: ollystack
+      CLICKHOUSE_USER: ollystack
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-changeme}
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  redis:
+    image: redis:7-alpine
+    container_name: ollystack-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================================
+  # Ingestion Layer
+  # ============================================================================
+
+  ingestion-gateway:
+    build:
+      context: ../../ingestion-gateway
+      dockerfile: Dockerfile
+    container_name: ollystack-ingestion
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Metrics
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      - OLLYSTACK_KAFKA_BROKERS=kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1'
+
+  # ============================================================================
+  # Processing Layer
+  # ============================================================================
+
+  storage-consumer:
+    build:
+      context: ../../storage-consumer
+      dockerfile: Dockerfile
+    container_name: ollystack-storage-consumer
+    ports:
+      - "8889:8889"   # Metrics
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=9000
+      - CLICKHOUSE_USER=ollystack
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-changeme}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  realtime-processor:
+    build:
+      context: ../../realtime-processor
+      dockerfile: Dockerfile
+    container_name: ollystack-realtime
+    ports:
+      - "8890:8890"   # Metrics
+    environment:
+      - KAFKA_BROKERS=kafka:29092
+      - REDIS_URL=redis:6379
+      - ALERTMANAGER_URL=http://alertmanager:9093
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+  # ============================================================================
+  # API & UI Layer
+  # ============================================================================
+
+  api-server:
+    build:
+      context: ../../api-server
+      dockerfile: Dockerfile
+    container_name: ollystack-api
+    ports:
+      - "8080:8080"
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DATABASE=ollystack
+      - CLICKHOUSE_USER=ollystack
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-changeme}
+      - REDIS_URL=redis://redis:6379
+      - AI_ENGINE_URL=http://ai-engine:8081
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  ai-engine:
+    build:
+      context: ../../ai-engine
+      dockerfile: Dockerfile
+    container_name: ollystack-ai
+    ports:
+      - "8081:8081"
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DATABASE=ollystack
+      - REDIS_URL=redis://redis:6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  web-ui:
+    build:
+      context: ../../web-ui
+      dockerfile: Dockerfile
+    container_name: ollystack-ui
+    ports:
+      - "3000:80"
+    depends_on:
+      - api-server
+
+  # ============================================================================
+  # Alerting
+  # ============================================================================
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: ollystack-alertmanager
+    ports:
+      - "9094:9093"
+    volumes:
+      - ./config/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+
+  # ============================================================================
+  # Demo Agent (for testing - in production, agents run on customer hosts)
+  # ============================================================================
+
+  unified-agent:
+    build:
+      context: ../../agents/unified-agent
+      dockerfile: Dockerfile
+    container_name: ollystack-agent
+    ports:
+      - "14317:4317"  # OTLP gRPC for apps
+      - "14318:4318"  # OTLP HTTP for apps
+      - "18888:8888"  # Health/metrics
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # Point to ingestion gateway
+      - OLLYSTACK_ENDPOINT=ingestion-gateway:4317
+      - OLLYSTACK_ENVIRONMENT=production
+    depends_on:
+      - ingestion-gateway
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 100M
+
+  # ============================================================================
+  # Monitoring (Grafana for dashboards)
+  # ============================================================================
+
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: ollystack-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - clickhouse
+
+volumes:
+  zookeeper_data:
+  zookeeper_logs:
+  kafka_data:
+  clickhouse_data:
+  redis_data:
+  alertmanager_data:
+  grafana_data:
+
+networks:
+  default:
+    name: ollystack-production

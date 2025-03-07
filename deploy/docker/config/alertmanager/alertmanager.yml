@@ -1,0 +1,89 @@
+# OllyStack AlertManager Configuration
+#
+# Routes alerts to appropriate receivers based on severity and labels
+
+global:
+  # Global SMTP settings
+  # smtp_smarthost: 'smtp.gmail.com:587'
+  # smtp_from: 'alertmanager@ollystack.io'
+  # smtp_auth_username: 'alertmanager@ollystack.io'
+  # smtp_auth_password: 'password'
+
+  # Global Slack settings
+  # slack_api_url: 'https://hooks.slack.com/services/...'
+
+  # Resolve timeout
+  resolve_timeout: 5m
+
+# Alertmanager routing tree
+route:
+  # Default receiver
+  receiver: 'default-receiver'
+
+  # Group alerts by alertname and service
+  group_by: ['alertname', 'service']
+
+  # How long to wait before sending notification for a group
+  group_wait: 30s
+
+  # How long to wait before sending notifications for new alerts in a group
+  group_interval: 5m
+
+  # How long to wait before resending notification
+  repeat_interval: 4h
+
+  # Child routes
+  routes:
+    # Critical alerts go to PagerDuty
+    - match:
+        severity: critical
+      receiver: 'critical-receiver'
+      group_wait: 10s
+      repeat_interval: 1h
+
+    # Warning alerts go to Slack
+    - match:
+        severity: warning
+      receiver: 'warning-receiver'
+      group_wait: 1m
+      repeat_interval: 4h
+
+# Inhibition rules
+inhibit_rules:
+  # If critical is firing, inhibit warning for same alertname
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'service']
+
+# Receivers
+receivers:
+  - name: 'default-receiver'
+    # Default: just log (no external notifications)
+    webhook_configs:
+      - url: 'http://api-server:8080/api/v1/alerts/webhook'
+        send_resolved: true
+
+  - name: 'critical-receiver'
+    webhook_configs:
+      - url: 'http://api-server:8080/api/v1/alerts/webhook'
+        send_resolved: true
+    # Uncomment for PagerDuty
+    # pagerduty_configs:
+    #   - service_key: 'your-pagerduty-service-key'
+    #     severity: critical
+
+  - name: 'warning-receiver'
+    webhook_configs:
+      - url: 'http://api-server:8080/api/v1/alerts/webhook'
+        send_resolved: true
+    # Uncomment for Slack
+    # slack_configs:
+    #   - channel: '#ollystack-alerts'
+    #     title: '{{ .GroupLabels.alertname }}'
+    #     text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+
+# Templates
+# templates:
+#   - '/etc/alertmanager/templates/*.tmpl'

@@ -1,0 +1,42 @@
+# OTel Collector for Log Collection
+# Run alongside existing services to collect logs from host and containers
+#
+# IMPORTANT: Uses logging driver "none" to prevent feedback loop where
+# the collector reads its own logs and generates more logs infinitely.
+version: '3.8'
+
+services:
+  otel-log-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    container_name: otel-log-collector
+    restart: unless-stopped
+    user: "0:0"  # Run as root to read Docker container logs
+    command: ["--config=/etc/otel/config.yaml"]
+    logging:
+      driver: "none"  # CRITICAL: Prevents collector logs from being re-ingested
+    volumes:
+      - ./config-with-logs.yaml:/etc/otel/config.yaml:ro
+      # Docker logs
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # System logs
+      - /var/log:/var/log:ro
+      # For timezone
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - OTEL_RESOURCE_ATTRIBUTES=host.name=${HOSTNAME:-ec2-host}
+    networks:
+      - ollystack
+    ports:
+      - "14317:4317"   # OTLP gRPC (different port to not conflict)
+      - "14318:4318"   # OTLP HTTP
+      - "13134:13133"  # Health check
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:13133/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  ollystack:
+    external: true

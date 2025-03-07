@@ -1,0 +1,178 @@
+# OllyStack Host Log Collector Configuration
+# Collects: Docker logs, System logs, Security events
+
+receivers:
+  # Docker container logs (JSON format)
+  filelog/docker:
+    include:
+      - /var/lib/docker/containers/*/*.log
+    include_file_path: true
+    start_at: end
+    operators:
+      - type: json_parser
+        id: parser-docker
+        timestamp:
+          parse_from: attributes.time
+          layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+      - type: move
+        from: attributes.log
+        to: body
+      - type: regex_parser
+        regex: '^/var/lib/docker/containers/(?P<container_id>[a-f0-9]{12})[a-f0-9]*/.*\.log$'
+        parse_from: attributes["log.file.path"]
+    attributes:
+      source: docker
+      log_type: container
+
+  # System messages
+  filelog/messages:
+    include:
+      - /var/log/messages
+    include_file_path: true
+    start_at: end
+    operators:
+      - type: regex_parser
+        regex: '^(?P<timestamp>\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(?P<hostname>\S+)\s+(?P<process>[^\[:]+)(\[(?P<pid>\d+)\])?:\s*(?P<message>.*)$'
+        timestamp:
+          parse_from: attributes.timestamp
+          layout_type: gotime
+          layout: 'Jan _2 15:04:05'
+    attributes:
+      source: system
+      log_type: syslog
+      service.name: ec2-host
+
+  # Security logs
+  filelog/secure:
+    include:
+      - /var/log/secure
+    include_file_path: true
+    start_at: end
+    operators:
+      - type: regex_parser
+        regex: '^(?P<timestamp>\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(?P<hostname>\S+)\s+(?P<process>[^\[:]+)(\[(?P<pid>\d+)\])?:\s*(?P<message>.*)$'
+        timestamp:
+          parse_from: attributes.timestamp
+          layout_type: gotime
+          layout: 'Jan _2 15:04:05'
+    attributes:
+      source: security
+      log_type: auth
+      service.name: ec2-security
+
+  # Audit logs
+  filelog/audit:
+    include:
+      - /var/log/audit/audit.log
+    include_file_path: true
+    start_at: end
+    operators:
+      - type: regex_parser
+        regex: '^type=(?P<audit_type>\w+)\s+msg=audit\((?P<epoch>\d+\.\d+):(?P<sequence>\d+)\):\s*(?P<message>.*)$'
+    attributes:
+      source: audit
+      log_type: audit
+      service.name: ec2-audit
+
+  # Cloud-init logs
+  filelog/cloud:
+    include:
+      - /var/log/cloud-init*.log
+      - /var/log/user-data.log
+    include_file_path: true
+    start_at: end
+    attributes:
+      source: cloud-init
+      log_type: startup
+      service.name: cloud-init
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 500
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+
+  resource:
+    attributes:
+      - key: host.name
+        value: ${HOSTNAME}
+        action: upsert
+      - key: deployment.environment
+        value: production
+        action: upsert
+
+  # Add service name from container
+  attributes/docker:
+    actions:
+      - key: service.name
+        from_attribute: container_id
+        action: upsert
+
+  # Detect security events
+  transform/security:
+    log_statements:
+      - context: log
+        statements:
+          - set(severity_text, "ERROR") where IsMatch(body, "(?i)(error|fail|fatal|denied|invalid)")
+          - set(severity_text, "WARN") where IsMatch(body, "(?i)(warn|warning|refused)")
+          - set(severity_text, "INFO") where severity_text == ""
+          - set(attributes["security.event_type"], "auth_failure") where IsMatch(body, "(?i)(authentication failure|failed password|invalid user)")
+          - set(attributes["security.event_type"], "auth_success") where IsMatch(body, "(?i)(accepted password|accepted publickey|session opened)")
+          - set(attributes["security.event_type"], "sudo") where IsMatch(body, "(?i)sudo")
+          - set(attributes["security.event_type"], "ssh") where IsMatch(body, "(?i)sshd")
+
+exporters:
+  clickhouse:
+    endpoint: tcp://127.0.0.1:9000
+    database: ollystack
+    username: default
+    password: ${CLICKHOUSE_PASSWORD:-changeme}
+    logs_table_name: logs
+    timeout: 30s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+
+  debug:
+    verbosity: basic
+    sampling_initial: 10
+    sampling_thereafter: 1000
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13134
+
+service:
+  extensions: [health_check]
+
+  pipelines:
+    logs/docker:
+      receivers: [filelog/docker]
+      processors: [memory_limiter, resource, attributes/docker, transform/security, batch]
+      exporters: [clickhouse, debug]
+
+    logs/system:
+      receivers: [filelog/messages]
+      processors: [memory_limiter, resource, transform/security, batch]
+      exporters: [clickhouse]
+
+    logs/security:
+      receivers: [filelog/secure, filelog/audit]
+      processors: [memory_limiter, resource, transform/security, batch]
+      exporters: [clickhouse]
+
+    logs/cloud:
+      receivers: [filelog/cloud]
+      processors: [memory_limiter, resource, batch]
+      exporters: [clickhouse]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8889

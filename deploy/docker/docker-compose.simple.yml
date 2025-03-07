@@ -1,0 +1,148 @@
+# OllyStack Simple Deployment
+#
+# Recommended architecture: Agent → Backend (no collector)
+# Run with: docker-compose -f docker-compose.simple.yml up -d
+#
+# This is the most efficient deployment:
+# - Single agent per host (~100MB)
+# - 90% data reduction via local aggregation
+# - Direct connection to backend
+
+version: '3.8'
+
+services:
+  # ============================================================================
+  # Storage
+  # ============================================================================
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.1
+    container_name: ollystack-clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./config/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      CLICKHOUSE_DB: ollystack
+      CLICKHOUSE_USER: ollystack
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-changeme}
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ollystack-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # ============================================================================
+  # OllyStack Backend
+  # ============================================================================
+
+  # Stream Processor - receives data from agents
+  stream-processor:
+    build:
+      context: ../../stream-processor
+      dockerfile: Dockerfile
+    container_name: ollystack-stream-processor
+    ports:
+      - "4317:4317"   # OTLP from agents
+    environment:
+      - RUST_LOG=info
+      - OLLYSTACK_SOURCES_OTLP_PORT=4317
+      - OLLYSTACK_SINKS_STORAGE_ENDPOINT=clickhouse:9000
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  # API Server
+  api-server:
+    build:
+      context: ../../api-server
+      dockerfile: Dockerfile
+    container_name: ollystack-api
+    ports:
+      - "8080:8080"
+    environment:
+      - OLLYSTACK_STORAGE_ENDPOINT=clickhouse:9000
+      - REDIS_URL=redis://redis:6379
+      - AI_ENGINE_URL=http://ai-engine:8081
+    depends_on:
+      - clickhouse
+      - redis
+
+  # Web UI
+  web-ui:
+    build:
+      context: ../../web-ui
+      dockerfile: Dockerfile
+    container_name: ollystack-ui
+    ports:
+      - "3000:80"
+    environment:
+      - API_URL=http://api-server:8080
+    depends_on:
+      - api-server
+
+  # AI Engine
+  ai-engine:
+    build:
+      context: ../../ai-engine
+      dockerfile: Dockerfile
+    container_name: ollystack-ai
+    ports:
+      - "8081:8081"
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - REDIS_URL=redis://redis:6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    depends_on:
+      - clickhouse
+      - redis
+
+  # ============================================================================
+  # Unified Agent (one per host in production)
+  # In dev, runs alongside backend for testing
+  # ============================================================================
+
+  unified-agent:
+    build:
+      context: ../../agents/unified-agent
+      dockerfile: Dockerfile
+    container_name: ollystack-agent
+    ports:
+      - "14317:4317"  # OTLP gRPC for apps (different port to avoid conflict)
+      - "14318:4318"  # OTLP HTTP for apps
+      - "8888:8888"   # Health/metrics
+    volumes:
+      - ../../agents/unified-agent/config/agent.yaml:/etc/ollystack/agent.yaml:ro
+      - /var/log:/var/log:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # Point directly to stream processor (no collector in between)
+      - OLLYSTACK_ENDPOINT=stream-processor:4317
+      - OLLYSTACK_ENVIRONMENT=development
+    depends_on:
+      - stream-processor
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 100M
+
+volumes:
+  clickhouse_data:
+  redis_data:
+
+networks:
+  default:
+    name: ollystack-network

@@ -1,0 +1,312 @@
+# OllyStack OTel Collector Configuration with Log Collection
+# Collects: Docker logs, System logs, Security events
+#
+# IMPORTANT: The collector container MUST use logging driver "none" to prevent
+# feedback loop where collector reads its own logs infinitely.
+# See docker-compose.logs.yaml for proper container configuration.
+
+receivers:
+  # OTLP for traces/metrics from applications
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Docker container logs (zero-code instrumentation)
+  # Note: The collector container uses logging driver "none" to prevent feedback loop
+  filelog/docker:
+    include:
+      - /var/lib/docker/containers/*/*.log
+    include_file_path: true
+    include_file_name: false
+    start_at: end  # Only collect new logs, not historical
+    poll_interval: 500ms
+    operators:
+      # Parse Docker JSON log format first
+      - type: json_parser
+        id: docker_parser
+        timestamp:
+          parse_from: attributes.time
+          layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+        on_error: drop
+
+      # Extract container ID from file path
+      - type: regex_parser
+        id: container_id_parser
+        regex: '/var/lib/docker/containers/(?P<container_id>[a-f0-9]+)/'
+        parse_from: attributes["log.file.path"]
+        parse_to: attributes
+        on_error: send
+
+      # Route based on whether the log body looks like JSON from our services
+      - type: router
+        id: format_router
+        routes:
+          # Route JSON logs from our services (contain "service" field)
+          - expr: 'attributes.log != nil and attributes.log matches "^\\{.*\"service\".*\\}"'
+            output: service_json_parser
+        default: plain_log_handler
+
+      # Parse JSON logs from our instrumented services
+      - type: json_parser
+        id: service_json_parser
+        parse_from: attributes.log
+        parse_to: body
+        on_error: send
+        output: move_trace_id
+
+      # Handle plain text logs (non-JSON)
+      - type: add
+        id: plain_log_handler
+        field: body
+        value: EXPR(attributes.log)
+        output: noop_end
+
+      # Move parsed fields to attributes for correlation
+      - type: move
+        id: move_trace_id
+        from: body.trace_id
+        to: attributes["trace_id"]
+        on_error: send
+      - type: move
+        id: move_span_id
+        from: body.span_id
+        to: attributes["span_id"]
+        on_error: send
+      - type: move
+        id: move_correlation_id
+        from: body.correlation_id
+        to: attributes["correlation_id"]
+        on_error: send
+      - type: move
+        id: move_service
+        from: body.service
+        to: resource["service.name"]
+        on_error: send
+      - type: move
+        id: move_level
+        from: body.level
+        to: attributes["level"]
+        on_error: send
+      - type: move
+        id: move_message
+        from: body.message
+        to: body
+        on_error: send
+
+      - type: noop
+        id: noop_end
+    attributes:
+      source: docker
+      log_type: container
+
+  # System logs (messages, syslog)
+  filelog/system:
+    include:
+      - /var/log/messages
+      - /var/log/syslog
+    include_file_path: true
+    start_at: end
+    operators:
+      - type: regex_parser
+        regex: '^(?P<timestamp>\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(?P<hostname>\S+)\s+(?P<process>\S+?)(\[(?P<pid>\d+)\])?:\s+(?P<message>.*)$'
+        timestamp:
+          parse_from: attributes.timestamp
+          layout_type: gotime
+          layout: 'Jan _2 15:04:05'
+    attributes:
+      source: system
+      log_type: syslog
+
+  # Security/Auth logs
+  filelog/security:
+    include:
+      - /var/log/secure
+      - /var/log/auth.log
+      - /var/log/audit/audit.log
+    include_file_path: true
+    start_at: end
+    operators:
+      - type: regex_parser
+        regex: '^(?P<timestamp>\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(?P<hostname>\S+)\s+(?P<process>\S+?)(\[(?P<pid>\d+)\])?:\s+(?P<message>.*)$'
+        if: 'attributes["log.file.path"] != "/var/log/audit/audit.log"'
+        timestamp:
+          parse_from: attributes.timestamp
+          layout_type: gotime
+          layout: 'Jan _2 15:04:05'
+    attributes:
+      source: security
+      log_type: auth
+
+  # Cloud-init and user-data logs
+  filelog/cloud:
+    include:
+      - /var/log/cloud-init*.log
+      - /var/log/user-data.log
+    include_file_path: true
+    start_at: end
+    attributes:
+      source: cloud-init
+      log_type: startup
+
+  # Nginx access logs (JSON format with correlation ID)
+  filelog/nginx:
+    include:
+      - /var/log/nginx/access.json
+    include_file_path: true
+    start_at: end
+    operators:
+      # Parse JSON log format
+      - type: json_parser
+        id: parser-nginx
+        timestamp:
+          parse_from: attributes.time
+          layout_type: epoch
+          layout: s.ms
+      # Move request_id to correlation_id for log correlation
+      - type: move
+        from: attributes.request_id
+        to: attributes.correlation_id
+      # Add service name
+      - type: add
+        field: attributes.service.name
+        value: nginx
+      # Add source identifier
+      - type: add
+        field: attributes.source
+        value: nginx-access-log
+      # Set severity based on HTTP status code
+      - type: severity_parser
+        parse_from: attributes.status
+        mapping:
+          error: [500, 501, 502, 503, 504]
+          warn: [400, 401, 403, 404, 405, 408, 429]
+          info: [200, 201, 204, 301, 302, 304]
+
+processors:
+  # Batch for efficiency
+  batch:
+    timeout: 5s
+    send_batch_size: 1000
+
+  # Memory limiter
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # Filter out logs without service name (system/infra logs from Docker pipeline)
+  filter/docker_logs:
+    logs:
+      exclude:
+        match_type: regexp
+        resource_attributes:
+          - key: service.name
+            value: "^$"
+
+  # Add resource attributes
+  resource:
+    attributes:
+      - key: host.name
+        from_attribute: hostname
+        action: upsert
+      - key: deployment.environment
+        value: production
+        action: upsert
+      - key: service.name
+        value: ec2-host
+        action: upsert
+
+  # Transform to add correlation and detect events
+  transform/logs:
+    log_statements:
+      - context: log
+        statements:
+          # Set severity based on keywords
+          - set(severity_text, "ERROR") where IsMatch(body, "(?i)(error|fail|fatal|panic|exception)")
+          - set(severity_text, "WARN") where IsMatch(body, "(?i)(warn|warning)")
+          - set(severity_text, "INFO") where severity_text == ""
+          # Security event detection
+          - set(attributes["security_event"], "auth_failure") where IsMatch(body, "(?i)(authentication failure|failed password|invalid user)")
+          - set(attributes["security_event"], "sudo") where IsMatch(body, "(?i)(sudo:|COMMAND=)")
+          - set(attributes["security_event"], "ssh") where IsMatch(body, "(?i)(sshd\\[|Accepted|Failed)")
+          - set(attributes["security_event"], "docker") where IsMatch(body, "(?i)(docker|container)")
+
+exporters:
+  # ClickHouse for storage
+  clickhouse:
+    endpoint: tcp://ollystack-clickhouse:9000
+    database: ollystack
+    username: default
+    password: ${CLICKHOUSE_PASSWORD:-changeme}
+    logs_table_name: logs
+    traces_table_name: traces
+    timeout: 30s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+
+  # Debug for troubleshooting
+  debug:
+    verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 500
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+
+  pipelines:
+    # Traces from applications
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+
+    # Metrics from applications
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+
+    # Logs from applications (OTLP)
+    logs/otlp:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+
+    # Docker container logs (filtered to only include service logs)
+    logs/docker:
+      receivers: [filelog/docker]
+      processors: [memory_limiter, filter/docker_logs, resource, transform/logs, batch]
+      exporters: [clickhouse]
+
+    # System logs
+    logs/system:
+      receivers: [filelog/system]
+      processors: [memory_limiter, resource, transform/logs, batch]
+      exporters: [clickhouse]
+
+    # Security logs
+    logs/security:
+      receivers: [filelog/security]
+      processors: [memory_limiter, resource, transform/logs, batch]
+      exporters: [clickhouse]
+
+    # Nginx access logs
+    logs/nginx:
+      receivers: [filelog/nginx]
+      processors: [memory_limiter, resource, batch]
+      exporters: [clickhouse, debug]
+
+  telemetry:
+    logs:
+      level: warn  # Reduced verbosity to minimize log output
+    metrics:
+      address: 0.0.0.0:8888

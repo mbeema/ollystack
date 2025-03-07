@@ -1,0 +1,125 @@
+# OllyStack Minimal Development Stack
+#
+# For local development and testing
+# Run: docker-compose -f docker-compose.minimal.yml up -d
+#
+# Components:
+# - ClickHouse: Storage + real-time aggregations via Materialized Views
+# - Ingestion Gateway: OTLP receiver → ClickHouse
+# - API Server: Query interface
+# - Web UI: Visualization
+#
+# Send data via OTLP:
+#   gRPC: localhost:4317
+#   HTTP: localhost:4318
+
+version: '3.8'
+
+services:
+  # ============================================================================
+  # Storage - ClickHouse
+  # ============================================================================
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.1
+    container_name: ollystack-clickhouse
+    ports:
+      - "8123:8123"  # HTTP
+      - "9000:9000"  # Native
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./config/clickhouse/init-minimal.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      CLICKHOUSE_DB: ollystack
+      CLICKHOUSE_USER: ollystack
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-changeme}
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # ============================================================================
+  # Ingestion - OTLP to ClickHouse
+  # ============================================================================
+
+  ingestion-gateway:
+    build:
+      context: ../../ingestion-gateway
+      dockerfile: Dockerfile
+    container_name: ollystack-ingestion
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Prometheus metrics
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=9000
+      - CLICKHOUSE_USER=ollystack
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-changeme}
+      - CLICKHOUSE_DATABASE=ollystack
+      # Disable sampling for dev
+      - OLLYSTACK_SAMPLING_ENABLED=false
+      # Disable rate limiting for dev
+      - OLLYSTACK_RATE_LIMIT_ENABLED=false
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  # ============================================================================
+  # Redis - Caching (optional for dev)
+  # ============================================================================
+
+  redis:
+    image: redis:7-alpine
+    container_name: ollystack-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+
+  # ============================================================================
+  # API Server
+  # ============================================================================
+
+  api-server:
+    build:
+      context: ../../api-server
+      dockerfile: Dockerfile
+    container_name: ollystack-api
+    ports:
+      - "8080:8080"
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DATABASE=ollystack
+      - CLICKHOUSE_USER=ollystack
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-changeme}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  # ============================================================================
+  # Web UI
+  # ============================================================================
+
+  web-ui:
+    build:
+      context: ../../web-ui
+      dockerfile: Dockerfile
+    container_name: ollystack-ui
+    ports:
+      - "3000:80"
+    depends_on:
+      - api-server
+
+volumes:
+  clickhouse_data:
+
+networks:
+  default:
+    name: ollystack-dev

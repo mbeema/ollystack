@@ -1,0 +1,275 @@
+# OllyStack API Server Configuration
+
+# =============================================================================
+# Server Settings
+# =============================================================================
+
+server:
+  # HTTP server address
+  address: ":8080"
+
+  # Read timeout
+  read_timeout: 30s
+
+  # Write timeout
+  write_timeout: 30s
+
+  # Idle timeout
+  idle_timeout: 120s
+
+  # Maximum header size
+  max_header_bytes: 1048576  # 1MB
+
+  # CORS settings
+  cors:
+    allowed_origins:
+      - "*"
+    allowed_methods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowed_headers:
+      - Authorization
+      - Content-Type
+      - X-Request-ID
+    exposed_headers:
+      - X-Request-ID
+    allow_credentials: true
+    max_age: 86400
+
+  # Rate limiting
+  rate_limit:
+    enabled: true
+    requests_per_second: 100
+    burst_size: 200
+
+# =============================================================================
+# Storage Configuration
+# =============================================================================
+
+storage:
+  # ClickHouse connection for all telemetry data
+  clickhouse:
+    # Connection settings
+    host: clickhouse
+    port: 9000
+    database: ollystack
+    username: default
+    password: ${CLICKHOUSE_PASSWORD:-changeme}
+
+    # Connection pool
+    max_open_conns: 20
+    max_idle_conns: 10
+    conn_max_lifetime: 1h
+
+    # Query settings
+    query_timeout: 30s
+    max_query_rows: 10000
+
+    # Tables
+    tables:
+      traces: otel_traces
+      metrics: otel_metrics
+      logs: otel_logs
+      topology: service_topology
+      alerts: alerts
+      anomalies: anomalies
+      dashboards: dashboards
+
+  # Redis for caching and real-time features
+  redis:
+    address: redis:6379
+    password: ""
+    db: 0
+    pool_size: 20
+
+    # Cache TTLs
+    cache:
+      service_list_ttl: 5m
+      topology_ttl: 1m
+      dashboard_ttl: 30s
+
+# =============================================================================
+# Authentication & Authorization
+# =============================================================================
+
+auth:
+  # Enable authentication
+  enabled: false
+
+  # JWT settings (when enabled)
+  jwt:
+    secret: "${JWT_SECRET}"
+    issuer: ollystack
+    expiration: 24h
+    refresh_expiration: 7d
+
+  # API key authentication
+  api_keys:
+    enabled: false
+    header_name: X-API-Key
+
+  # OAuth2/OIDC (enterprise)
+  oauth2:
+    enabled: false
+    provider: ""
+    client_id: ""
+    client_secret: ""
+    redirect_url: ""
+
+# =============================================================================
+# API Features
+# =============================================================================
+
+features:
+  # GraphQL API
+  graphql:
+    enabled: true
+    playground: true
+    introspection: true
+
+  # WebSocket for real-time updates
+  websocket:
+    enabled: true
+    ping_interval: 30s
+    pong_timeout: 10s
+
+  # AI features
+  ai:
+    enabled: true
+    # AI engine endpoint
+    endpoint: http://ai-engine:8081
+    # Request timeout
+    timeout: 60s
+
+  # Alerting
+  alerting:
+    enabled: true
+    evaluation_interval: 1m
+    # Notification channels
+    channels:
+      - type: webhook
+        name: default
+        url: ""
+
+# =============================================================================
+# Query Engine
+# =============================================================================
+
+query:
+  # ObservQL settings
+  observql:
+    enabled: true
+    max_query_duration: 60s
+    max_result_rows: 100000
+
+  # PromQL compatibility
+  promql:
+    enabled: true
+    max_lookback: 7d
+
+  # SQL interface
+  sql:
+    enabled: true
+    allowed_tables:
+      - otel_traces
+      - otel_metrics
+      - otel_logs
+      - service_topology
+      - service_metrics_1m
+      - error_rates_5m
+
+# =============================================================================
+# Logging
+# =============================================================================
+
+logging:
+  # Log level: debug, info, warn, error
+  level: info
+
+  # Log format: json, text
+  format: json
+
+  # Output: stdout, file
+  output: stdout
+
+  # Include caller info
+  caller: false
+
+  # Log file settings (when output: file)
+  file:
+    path: /var/log/ollystack/api-server.log
+    max_size: 100  # MB
+    max_backups: 3
+    max_age: 7     # days
+    compress: true
+
+# =============================================================================
+# Metrics & Tracing (Self-observability)
+# =============================================================================
+
+telemetry:
+  # Prometheus metrics
+  metrics:
+    enabled: true
+    path: /metrics
+
+  # OpenTelemetry tracing
+  tracing:
+    enabled: true
+    endpoint: http://otel-collector:4317
+    sampling_rate: 0.1
+    service_name: ollystack-api-server
+
+  # Health checks
+  health:
+    enabled: true
+    path: /health
+    readiness_path: /ready
+
+# =============================================================================
+# Security
+# =============================================================================
+
+security:
+  # TLS settings
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+
+  # Request validation
+  validation:
+    max_body_size: 10485760  # 10MB
+    max_query_params: 100
+
+  # Security headers
+  headers:
+    x_frame_options: DENY
+    x_content_type_options: nosniff
+    x_xss_protection: "1; mode=block"
+    content_security_policy: "default-src 'self'"
+
+# =============================================================================
+# Performance
+# =============================================================================
+
+performance:
+  # Response compression
+  compression:
+    enabled: true
+    level: 5
+    min_length: 1024
+
+  # Request caching
+  caching:
+    enabled: true
+    default_ttl: 30s
+    max_entries: 10000
+
+  # Connection keep-alive
+  keep_alive:
+    enabled: true
+    timeout: 60s

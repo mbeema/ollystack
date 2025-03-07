@@ -1,0 +1,249 @@
+# OpenTelemetry Collector Configuration
+# This is the standard OTel Collector Contrib with our custom processors
+
+receivers:
+  # OTLP receiver for traces, metrics, logs
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Filelog receiver for Docker container logs (zero-code instrumentation)
+  filelog/docker:
+    include:
+      - /var/lib/docker/containers/*/*.log
+    include_file_path: true
+    include_file_name: false
+    operators:
+      # Parse Docker JSON log format
+      - type: json_parser
+        id: docker_parser
+        timestamp:
+          parse_from: attributes.time
+          layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+      # Extract container ID from file path
+      - type: regex_parser
+        id: container_id_parser
+        regex: '/var/lib/docker/containers/(?P<container_id>[a-f0-9]+)/'
+        parse_from: attributes["log.file.path"]
+        parse_to: attributes
+      # Parse the log body if it's JSON (service logs)
+      - type: json_parser
+        id: body_json_parser
+        parse_from: attributes.log
+        parse_to: body
+        on_error: send
+      # Move parsed fields to attributes for correlation
+      - type: move
+        id: move_trace_id
+        from: body.trace_id
+        to: attributes["trace_id"]
+        on_error: send
+      - type: move
+        id: move_span_id
+        from: body.span_id
+        to: attributes["span_id"]
+        on_error: send
+      - type: move
+        id: move_correlation_id
+        from: body.correlation_id
+        to: attributes["correlation_id"]
+        on_error: send
+      - type: move
+        id: move_service
+        from: body.service
+        to: resource["service.name"]
+        on_error: send
+      - type: move
+        id: move_level
+        from: body.level
+        to: attributes["level"]
+        on_error: send
+      - type: move
+        id: move_message
+        from: body.message
+        to: body
+        on_error: send
+
+  # Host metrics (CPU, memory, disk, network)
+  hostmetrics:
+    collection_interval: 10s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.utilization:
+            enabled: true
+      memory:
+        metrics:
+          system.memory.utilization:
+            enabled: true
+      disk:
+      filesystem:
+      network:
+      load:
+      processes:
+      process:
+        include:
+          match_type: regexp
+          names: [".*"]
+
+  # Prometheus scraping for Kubernetes
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'otel-collector'
+          scrape_interval: 10s
+          static_configs:
+            - targets: ['localhost:8888']
+
+  # Docker stats
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+    collection_interval: 10s
+
+processors:
+  # Memory limiter to prevent OOM
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 1500
+    spike_limit_mib: 500
+
+  # Batch for efficiency
+  batch:
+    send_batch_size: 10000
+    timeout: 10s
+
+  # Add resource attributes
+  resource:
+    attributes:
+      - key: ollystack.collector.version
+        value: "1.0.0"
+        action: insert
+
+  # Kubernetes attributes (when running in K8s)
+  k8sattributes:
+    auth_type: "serviceAccount"
+    passthrough: false
+    extract:
+      metadata:
+        - k8s.pod.name
+        - k8s.pod.uid
+        - k8s.deployment.name
+        - k8s.namespace.name
+        - k8s.node.name
+        - k8s.container.name
+      labels:
+        - tag_name: app
+          key: app
+          from: pod
+        - tag_name: version
+          key: version
+          from: pod
+
+  # Tail-based sampling for traces
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 100000
+    expected_new_traces_per_sec: 1000
+    policies:
+      # Always sample errors
+      - name: errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      # Sample high latency traces
+      - name: high-latency
+        type: latency
+        latency:
+          threshold_ms: 1000
+      # Rate limit the rest
+      - name: rate-limit
+        type: rate_limiting
+        rate_limiting:
+          spans_per_second: 100
+
+  # Transform for data normalization
+  transform:
+    trace_statements:
+      - context: span
+        statements:
+          # Normalize HTTP method
+          - set(attributes["http.method"], ConvertCase(attributes["http.method"], "upper"))
+    metric_statements:
+      - context: datapoint
+        statements: []
+    log_statements:
+      - context: log
+        statements: []
+
+exporters:
+  # Debug output (for development)
+  debug:
+    verbosity: detailed
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+  # OTLP to our stream processor
+  otlp/stream-processor:
+    endpoint: stream-processor:4317
+    tls:
+      insecure: true
+
+  # ClickHouse for storage
+  clickhouse:
+    endpoint: tcp://clickhouse:9000
+    database: ollystack
+    username: default
+    password: ${CLICKHOUSE_PASSWORD:-changeme}
+    ttl_days: 30
+    traces_table_name: otel_traces
+    metrics_table_name: otel_metrics
+    logs_table_name: otel_logs
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+  # Prometheus exporter for self-metrics
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: ollystack
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  pprof:
+    endpoint: 0.0.0.0:1777
+
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, pprof, zpages]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource, tail_sampling, transform]
+      exporters: [otlp/stream-processor, clickhouse]
+
+    metrics:
+      receivers: [otlp, hostmetrics, prometheus]
+      processors: [memory_limiter, batch, resource, transform]
+      exporters: [otlp/stream-processor, clickhouse, prometheus]
+
+    logs:
+      receivers: [otlp, filelog/docker]
+      processors: [memory_limiter, batch, resource, transform]
+      exporters: [otlp/stream-processor, clickhouse]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888

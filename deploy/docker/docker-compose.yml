@@ -1,0 +1,228 @@
+# OllyStack - Simplified Production Stack
+#
+# Architecture: Agent → Ingestion Gateway → ClickHouse (Direct)
+# No Kafka required - simpler, cheaper, easier to operate
+#
+# Run: docker-compose up -d
+
+version: '3.8'
+
+services:
+  # ============================================================================
+  # Storage - ClickHouse (Storage + Real-time Analytics via Materialized Views)
+  # ============================================================================
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.1
+    container_name: ollystack-clickhouse
+    ports:
+      - "8123:8123"  # HTTP interface
+      - "9000:9000"  # Native protocol
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./config/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      CLICKHOUSE_DB: ollystack
+      CLICKHOUSE_USER: ollystack
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-${CLICKHOUSE_PASSWORD:-changeme}}
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  # ============================================================================
+  # Ingestion Gateway - OTLP → ClickHouse (Direct)
+  # ============================================================================
+
+  ingestion-gateway:
+    build:
+      context: ../../ingestion-gateway
+      dockerfile: Dockerfile
+    container_name: ollystack-ingestion
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Prometheus metrics
+    environment:
+      # ClickHouse connection
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=9000
+      - CLICKHOUSE_USER=ollystack
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-${CLICKHOUSE_PASSWORD:-changeme}}
+      - CLICKHOUSE_DATABASE=ollystack
+      # Batching
+      - OLLYSTACK_CLICKHOUSE_BATCH_SIZE=10000
+      - OLLYSTACK_CLICKHOUSE_FLUSH_INTERVAL=1s
+      # Sampling
+      - OLLYSTACK_SAMPLING_ENABLED=true
+      - OLLYSTACK_SAMPLING_DEFAULT_RATE=0.1
+      - OLLYSTACK_SAMPLING_ERROR_RATE=1.0
+      - OLLYSTACK_SAMPLING_SLOW_RATE=1.0
+      # Rate limiting
+      - OLLYSTACK_RATE_LIMIT_ENABLED=true
+      - OLLYSTACK_RATE_LIMIT_DEFAULT_RPS=10000
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '2'
+
+  # ============================================================================
+  # Redis - Caching and Real-time State
+  # ============================================================================
+
+  redis:
+    image: redis:7-alpine
+    container_name: ollystack-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================================
+  # Alert Processor - Queries ClickHouse MVs for Real-time Alerting
+  # ============================================================================
+
+  alert-processor:
+    build:
+      context: ../../realtime-processor
+      dockerfile: Dockerfile
+    container_name: ollystack-alerts
+    ports:
+      - "8890:8890"
+    environment:
+      # Query ClickHouse Materialized Views for alerting
+      - OLLYSTACK_MODE=query
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_USER=ollystack
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-${CLICKHOUSE_PASSWORD:-changeme}}
+      - REDIS_URL=redis://redis:6379
+      - ALERTMANAGER_URL=http://alertmanager:9093
+      # Alert evaluation interval (1 second for near real-time)
+      - OLLYSTACK_ALERT_INTERVAL_MS=1000
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ============================================================================
+  # API Server - Query Interface
+  # ============================================================================
+
+  api-server:
+    build:
+      context: ../../api-server
+      dockerfile: Dockerfile
+    container_name: ollystack-api
+    ports:
+      - "8080:8080"
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DATABASE=ollystack
+      - CLICKHOUSE_USER=ollystack
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-${CLICKHOUSE_PASSWORD:-changeme}}
+      - REDIS_URL=redis://redis:6379
+      - AI_ENGINE_URL=http://ai-engine:8081
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  # ============================================================================
+  # AI Engine - ML/LLM for Insights
+  # ============================================================================
+
+  ai-engine:
+    build:
+      context: ../../ai-engine
+      dockerfile: Dockerfile
+    container_name: ollystack-ai
+    ports:
+      - "8081:8081"
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DATABASE=ollystack
+      - CLICKHOUSE_USER=ollystack
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-${CLICKHOUSE_PASSWORD:-changeme}}
+      - REDIS_URL=redis://redis:6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  # ============================================================================
+  # Web UI - React Frontend
+  # ============================================================================
+
+  web-ui:
+    build:
+      context: ../../web-ui
+      dockerfile: Dockerfile
+    container_name: ollystack-ui
+    ports:
+      - "3000:80"
+    depends_on:
+      - api-server
+
+  # ============================================================================
+  # AlertManager - Alert Routing & Notifications
+  # ============================================================================
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: ollystack-alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./config/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+
+  # ============================================================================
+  # Grafana (Optional) - Additional Dashboarding
+  # ============================================================================
+
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: ollystack-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - clickhouse
+
+volumes:
+  clickhouse_data:
+  redis_data:
+  alertmanager_data:
+  grafana_data:
+
+networks:
+  default:
+    name: ollystack

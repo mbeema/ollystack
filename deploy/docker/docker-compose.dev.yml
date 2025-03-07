@@ -1,0 +1,317 @@
+version: '3.8'
+
+# OllyStack Development Environment
+# Uses best-in-class OSS for collection, custom components for analytics
+# Run with: docker-compose -f deploy/docker/docker-compose.dev.yml up -d
+
+services:
+  # ============================================================================
+  # Storage Layer
+  # ============================================================================
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.1
+    container_name: ollystack-clickhouse
+    ports:
+      - "8123:8123"  # HTTP
+      - "9000:9000"  # Native
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./config/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      CLICKHOUSE_DB: ollystack
+      CLICKHOUSE_USER: ollystack
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-changeme}
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ollystack-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================================
+  # Collection Layer (OSS)
+  # ============================================================================
+
+  # OpenTelemetry Collector - Primary ingestion gateway
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.93.0
+    container_name: ollystack-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Prometheus metrics (self)
+      - "8889:8889"   # Prometheus exporter
+      - "13133:13133" # Health check
+    volumes:
+      - ./config/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:13133/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Vector - High-performance log collection
+  vector:
+    image: timberio/vector:0.35.0-alpine
+    container_name: ollystack-vector
+    ports:
+      - "8686:8686"  # Vector API
+    volumes:
+      - ./config/vector/vector.toml:/etc/vector/vector.toml:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    environment:
+      - VECTOR_LOG=info
+    depends_on:
+      - otel-collector
+
+  # Grafana Beyla - eBPF auto-instrumentation (optional, needs privileged)
+  beyla:
+    image: grafana/beyla:1.3
+    container_name: ollystack-beyla
+    profiles:
+      - ebpf
+    privileged: true
+    pid: host
+    network_mode: host
+    volumes:
+      - ./config/beyla/config.yaml:/etc/beyla/config.yaml:ro
+    environment:
+      - BEYLA_CONFIG_PATH=/etc/beyla/config.yaml
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+
+  # ============================================================================
+  # ALTERNATIVE: OllyStack Unified Agent (replaces otel-collector + vector)
+  # Use profile 'unified-agent' to enable: docker-compose --profile unified-agent up
+  # This is more efficient: single binary, local aggregation, 90% data reduction
+  # ============================================================================
+
+  unified-agent:
+    build:
+      context: ../../agents/unified-agent
+      dockerfile: Dockerfile
+    container_name: ollystack-unified-agent
+    profiles:
+      - unified-agent
+    ports:
+      - "4317:4317"   # OTLP gRPC (for apps to send traces)
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Health/metrics
+    volumes:
+      - ../../agents/unified-agent/config/agent.yaml:/etc/ollystack/agent.yaml:ro
+      - /var/log:/var/log:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - OLLYSTACK_ENDPOINT=stream-processor:4317
+      - OLLYSTACK_ENVIRONMENT=development
+    depends_on:
+      stream-processor:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8888/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Resource limits - lightweight!
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 100M
+        reservations:
+          cpus: '0.1'
+          memory: 50M
+
+  # ============================================================================
+  # OllyStack Core Services (Custom)
+  # ============================================================================
+
+  # Stream Processor - Real-time analytics (OUR VALUE-ADD)
+  stream-processor:
+    build:
+      context: ../../stream-processor
+      dockerfile: Dockerfile
+    container_name: ollystack-stream-processor
+    ports:
+      - "4320:4317"  # OTLP input from collector
+    environment:
+      - RUST_LOG=info
+      - OLLYSTACK_SOURCES_OTLP_PORT=4317
+      - OLLYSTACK_SINKS_STORAGE_ENDPOINT=clickhouse:9000
+      - OLLYSTACK_SINKS_STORAGE_DATABASE=ollystack
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # API Server - REST/GraphQL API (OUR VALUE-ADD)
+  api-server:
+    build:
+      context: ../../api-server
+      dockerfile: Dockerfile
+    container_name: ollystack-api
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config/api-server/config.yaml:/etc/ollystack/api-server.yaml:ro
+    environment:
+      - OLLYSTACK_SERVER_ADDRESS=:8080
+      - OLLYSTACK_STORAGE_METRICS_ENDPOINT=clickhouse:9000
+      - OLLYSTACK_STORAGE_LOGS_ENDPOINT=clickhouse:9000
+      - OLLYSTACK_STORAGE_TRACES_ENDPOINT=clickhouse:9000
+      - REDIS_URL=redis://redis:6379
+      - AI_ENGINE_URL=http://ai-engine:8081
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Web UI - React frontend (OUR VALUE-ADD)
+  web-ui:
+    build:
+      context: ../../web-ui
+      dockerfile: Dockerfile
+    container_name: ollystack-ui
+    ports:
+      - "3000:80"
+    environment:
+      - API_URL=http://api-server:8080
+    depends_on:
+      - api-server
+
+  # AI Engine - NLQ, Anomaly Detection, RCA (OUR VALUE-ADD)
+  ai-engine:
+    build:
+      context: ../../ai-engine
+      dockerfile: Dockerfile
+    container_name: ollystack-ai
+    ports:
+      - "8081:8081"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8081
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DATABASE=ollystack
+      - CLICKHOUSE_USER=ollystack
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-changeme}
+      - REDIS_URL=redis://redis:6379
+      # LLM configuration (set your API keys)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # For local LLM (Ollama)
+      - OLLAMA_URL=http://ollama:11434
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Ollama - Local LLM (optional)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollystack-ollama
+    profiles:
+      - local-llm
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # Pull a model on startup (uncomment to auto-pull)
+    # command: ["serve"]
+
+  # ============================================================================
+  # Demo Applications (for testing)
+  # ============================================================================
+
+  # Sample app with OTel instrumentation
+  demo-frontend:
+    image: ghcr.io/open-telemetry/demo:1.7.0-frontend
+    container_name: demo-frontend
+    profiles:
+      - demo
+    ports:
+      - "8090:8080"
+    environment:
+      - OTEL_SERVICE_NAME=frontend
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=demo
+
+  demo-api:
+    image: ghcr.io/open-telemetry/demo:1.7.0-productcatalogservice
+    container_name: demo-api
+    profiles:
+      - demo
+    environment:
+      - OTEL_SERVICE_NAME=product-catalog
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=demo
+
+  # Load generator
+  demo-loadgen:
+    image: ghcr.io/open-telemetry/demo:1.7.0-loadgenerator
+    container_name: demo-loadgen
+    profiles:
+      - demo
+    environment:
+      - OTEL_SERVICE_NAME=loadgenerator
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - LOCUST_HOST=http://demo-frontend:8080
+
+  # ============================================================================
+  # Optional: Grafana for comparison/visualization
+  # ============================================================================
+
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: ollystack-grafana
+    profiles:
+      - monitoring
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+
+volumes:
+  clickhouse_data:
+  redis_data:
+  grafana_data:
+  ollama_data:
+
+networks:
+  default:
+    name: ollystack-network

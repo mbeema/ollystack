@@ -1,0 +1,223 @@
+# Grafana Beyla Configuration
+# eBPF-based auto-instrumentation for zero-code observability
+
+# =============================================================================
+# Application Discovery
+# =============================================================================
+
+# Discover applications to instrument
+discovery:
+  # Services can be discovered by multiple criteria
+  services:
+    # By open port
+    - name: web-services
+      namespace: production
+      open_ports: 8080,8443,3000,80,443
+
+    # By executable name
+    - name: go-services
+      namespace: production
+      exe_path_regexp: "/usr/local/bin/.*"
+
+    # By Kubernetes metadata (when running in K8s)
+    - name: k8s-services
+      namespace: production
+      k8s_namespace: default
+      k8s_deployment_name: ".*"
+
+# =============================================================================
+# Instrumentation Settings
+# =============================================================================
+
+# eBPF settings
+ebpf:
+  # Enable different protocol parsers
+  http:
+    enabled: true
+    # Path patterns to exclude from tracing
+    exclude_paths:
+      - /health
+      - /healthz
+      - /ready
+      - /readiness
+      - /liveness
+      - /metrics
+      - /favicon.ico
+
+  grpc:
+    enabled: true
+
+  # Database protocol parsing
+  sql:
+    enabled: true
+
+  redis:
+    enabled: true
+
+  kafka:
+    enabled: true
+
+# Trace context propagation
+# Beyla can propagate trace context through HTTP headers
+trace_context:
+  # Enable W3C Trace Context propagation
+  enabled: true
+  # Header name for trace parent
+  header_name: traceparent
+
+# =============================================================================
+# Metrics Configuration
+# =============================================================================
+
+metrics:
+  # Enable RED metrics (Rate, Errors, Duration)
+  enabled: true
+
+  # Histogram buckets for latency
+  histogram_buckets:
+    - 0.005   # 5ms
+    - 0.01    # 10ms
+    - 0.025   # 25ms
+    - 0.05    # 50ms
+    - 0.1     # 100ms
+    - 0.25    # 250ms
+    - 0.5     # 500ms
+    - 1       # 1s
+    - 2.5     # 2.5s
+    - 5       # 5s
+    - 10      # 10s
+
+  # Additional attributes to include
+  extra_attributes:
+    - http.method
+    - http.status_code
+    - http.route
+    - db.system
+    - db.name
+    - rpc.system
+    - rpc.service
+
+# =============================================================================
+# Traces Configuration
+# =============================================================================
+
+traces:
+  enabled: true
+
+  # Sampling configuration
+  sampling:
+    # Head-based sampling rate (0.0 to 1.0)
+    # 1.0 = sample everything
+    # Use tail-based sampling at collector for production
+    rate: 1.0
+
+  # Span attributes
+  attributes:
+    # Include HTTP headers as span attributes
+    http_headers:
+      - user-agent
+      - x-request-id
+      - x-correlation-id
+
+# =============================================================================
+# Export Configuration
+# =============================================================================
+
+# OpenTelemetry export
+otel:
+  # OTLP endpoint
+  endpoint: http://otel-collector:4318
+
+  # Protocol: grpc or http
+  protocol: http
+
+  # Export interval
+  interval: 5s
+
+  # Batch settings
+  batch_size: 1000
+
+  # Resource attributes
+  resource_attributes:
+    service.namespace: ollystack
+    deployment.environment: production
+    telemetry.sdk.name: beyla
+    telemetry.sdk.language: ebpf
+
+# Prometheus metrics endpoint (optional)
+prometheus:
+  enabled: true
+  port: 9090
+  path: /metrics
+
+# =============================================================================
+# Internal Metrics (Beyla self-monitoring)
+# =============================================================================
+
+internal_metrics:
+  enabled: true
+  port: 9091
+  path: /internal/metrics
+
+# =============================================================================
+# Logging
+# =============================================================================
+
+log:
+  level: info
+  # Structured logging format
+  format: json
+
+# =============================================================================
+# Advanced Settings
+# =============================================================================
+
+# Ring buffer sizes for eBPF
+buffers:
+  # Number of trace events to buffer
+  trace_events: 8192
+  # Number of metric events to buffer
+  metric_events: 4096
+
+# CPU affinity (for high-performance scenarios)
+# cpu_affinity:
+#   enabled: false
+#   cpus: [0, 1]
+
+# =============================================================================
+# Kubernetes Integration
+# =============================================================================
+
+kubernetes:
+  # Enable Kubernetes metadata enrichment
+  enabled: true
+
+  # Add pod labels as span attributes
+  pod_labels:
+    - app
+    - version
+    - team
+
+  # Add pod annotations as span attributes
+  pod_annotations:
+    - ollystack.io/owner
+
+# =============================================================================
+# Network Observability (Advanced)
+# =============================================================================
+
+network:
+  # Enable network-level metrics
+  enabled: true
+
+  # Track TCP connections
+  tcp:
+    enabled: true
+    # Connection state tracking
+    track_state: true
+
+  # DNS monitoring
+  dns:
+    enabled: true
+    # Capture DNS queries and responses
+    capture_queries: true

@@ -1,0 +1,28 @@
+# Grafana Datasource Provisioning
+#
+# Auto-configure ClickHouse as the primary datasource
+
+apiVersion: 1
+
+datasources:
+  # ClickHouse for metrics, logs, and traces
+  - name: ClickHouse
+    type: grafana-clickhouse-datasource
+    access: proxy
+    url: http://clickhouse:8123
+    jsonData:
+      defaultDatabase: ollystack
+      username: default
+    secureJsonData:
+      password: ${CLICKHOUSE_PASSWORD:-changeme}
+    isDefault: true
+    editable: true
+
+  # AlertManager for alerts
+  - name: AlertManager
+    type: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    jsonData:
+      implementation: prometheus
+    editable: true
