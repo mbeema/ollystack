@@ -1,0 +1,143 @@
+{{- if .Values.storageConsumer.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ollystack.fullname" . }}-storage-consumer
+  labels:
+    {{- include "ollystack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: storage-consumer
+spec:
+  {{- if not .Values.storageConsumer.autoscaling.enabled }}
+  replicas: {{ .Values.storageConsumer.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "ollystack.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: storage-consumer
+  template:
+    metadata:
+      labels:
+        {{- include "ollystack.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: storage-consumer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8889"
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+      # Prefer spot instances for cost savings
+      {{- if and .Values.costOptimization.spotInstances.enabled (has "storageConsumer" .Values.costOptimization.spotInstances.components) }}
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node.kubernetes.io/lifecycle
+                    operator: In
+                    values:
+                      - spot
+      tolerations:
+        - key: "node.kubernetes.io/lifecycle"
+          operator: "Equal"
+          value: "spot"
+          effect: "NoSchedule"
+      {{- end }}
+      containers:
+        - name: storage-consumer
+          image: "{{ .Values.storageConsumer.image.repository }}:{{ .Values.storageConsumer.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 8889
+              protocol: TCP
+          env:
+            - name: KAFKA_BROKERS
+              value: "{{ include "ollystack.kafkaBrokers" . }}"
+            - name: CLICKHOUSE_HOST
+              value: "{{ include "ollystack.clickhouseHost" . }}"
+            - name: CLICKHOUSE_PORT
+              value: "9000"
+            - name: CLICKHOUSE_USER
+              value: "{{ .Values.clickhouse.auth.username }}"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.clickhouse.auth.existingSecret }}
+                  key: {{ .Values.clickhouse.auth.existingSecretKey }}
+            - name: CLICKHOUSE_DATABASE
+              value: "ollystack"
+            - name: OLLYSTACK_BATCHER_MAX_SIZE
+              value: "{{ .Values.storageConsumer.batcher.maxSize }}"
+            - name: OLLYSTACK_BATCHER_MAX_BYTES
+              value: "{{ .Values.storageConsumer.batcher.maxBytes }}"
+            - name: OLLYSTACK_BATCHER_FLUSH_INTERVAL_MS
+              value: "{{ .Values.storageConsumer.batcher.flushIntervalMs }}"
+          resources:
+            {{- toYaml .Values.storageConsumer.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+{{- if .Values.storageConsumer.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "ollystack.fullname" . }}-storage-consumer
+  labels:
+    {{- include "ollystack.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "ollystack.fullname" . }}-storage-consumer
+  minReplicas: {{ .Values.storageConsumer.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.storageConsumer.autoscaling.maxReplicas }}
+  metrics:
+    # Scale based on Kafka consumer lag
+    - type: External
+      external:
+        metric:
+          name: kafka_consumergroup_lag
+          selector:
+            matchLabels:
+              consumergroup: ollystack-storage-consumer
+        target:
+          type: AverageValue
+          averageValue: "10000"
+    # Also scale on CPU as fallback
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+{{- end }}
+{{- end }}

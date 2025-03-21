@@ -1,0 +1,112 @@
+{{- if .Values.realtimeProcessor.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ollystack.fullname" . }}-realtime-processor
+  labels:
+    {{- include "ollystack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: realtime-processor
+spec:
+  {{- if not .Values.realtimeProcessor.autoscaling.enabled }}
+  replicas: {{ .Values.realtimeProcessor.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "ollystack.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: realtime-processor
+  template:
+    metadata:
+      labels:
+        {{- include "ollystack.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: realtime-processor
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8890"
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+      # High priority for real-time alerting
+      priorityClassName: high-priority
+      containers:
+        - name: realtime-processor
+          image: "{{ .Values.realtimeProcessor.image.repository }}:{{ .Values.realtimeProcessor.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 8890
+              protocol: TCP
+          env:
+            - name: KAFKA_BROKERS
+              value: "{{ include "ollystack.kafkaBrokers" . }}"
+            - name: REDIS_URL
+              value: "{{ include "ollystack.redisHost" . }}"
+            - name: ALERTMANAGER_URL
+              value: "{{ include "ollystack.alertmanagerUrl" . }}"
+            - name: OLLYSTACK_ALERTING_EVALUATION_INTERVAL_MS
+              value: "{{ .Values.realtimeProcessor.alerting.evaluationIntervalMs }}"
+          resources:
+            {{- toYaml .Values.realtimeProcessor.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+{{- if .Values.realtimeProcessor.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "ollystack.fullname" . }}-realtime-processor
+  labels:
+    {{- include "ollystack.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "ollystack.fullname" . }}-realtime-processor
+  minReplicas: {{ .Values.realtimeProcessor.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.realtimeProcessor.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.realtimeProcessor.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    # Fast scale-up for real-time processing
+    scaleUp:
+      stabilizationWindowSeconds: 15
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+{{- end }}
+---
+# Priority class for real-time processing
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+value: 1000000
+globalDefault: false
+description: "High priority for real-time alert processing"
+{{- end }}

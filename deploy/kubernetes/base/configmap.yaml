@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ollystack-config
+  namespace: ollystack
+data:
+  LOG_LEVEL: "info"
+  CLICKHOUSE_PORT: "9440"
+  CLICKHOUSE_DATABASE: "ollystack"
+  CLICKHOUSE_USER: "default"
+  CLICKHOUSE_SECURE: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: ollystack
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+            cors:
+              allowed_origins: ["*"]
+
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: 'otel-collector'
+              scrape_interval: 30s
+              static_configs:
+                - targets: ['localhost:8888']
+
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 10000
+
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 1024
+        spike_limit_mib: 256
+
+      resourcedetection:
+        detectors: [env, system]
+        timeout: 5s
+
+      tail_sampling:
+        decision_wait: 10s
+        num_traces: 100000
+        policies:
+          - name: errors-policy
+            type: status_code
+            status_code:
+              status_codes: [ERROR]
+          - name: latency-policy
+            type: latency
+            latency:
+              threshold_ms: 1000
+          - name: probabilistic-policy
+            type: probabilistic
+            probabilistic:
+              sampling_percentage: 10
+
+    exporters:
+      clickhouse:
+        endpoint: tcp://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}
+        database: ${CLICKHOUSE_DATABASE}
+        username: ${CLICKHOUSE_USER}
+        password: ${CLICKHOUSE_PASSWORD}
+        ttl: 72h
+
+      debug:
+        verbosity: basic
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resourcedetection, tail_sampling, batch]
+          exporters: [debug]  # Use debug until ClickHouse is configured
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, resourcedetection, batch]
+          exporters: [debug]  # Use debug until ClickHouse is configured
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, resourcedetection, batch]
+          exporters: [debug]  # Use debug until ClickHouse is configured

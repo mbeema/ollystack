@@ -1,0 +1,47 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ollystack
+
+resources:
+  - ../../base
+
+# Production-specific patches
+patches:
+  # Increase replicas for production
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: Deployment
+      name: api-server
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: Deployment
+      name: otel-collector
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+    target:
+      kind: Deployment
+      name: web-ui
+
+# Production images (use specific tags, not latest)
+images:
+  - name: ollystack/api-server
+    newTag: v1.0.0
+  - name: ollystack/web-ui
+    newTag: v1.0.0
+
+# Production labels
+commonLabels:
+  environment: production
+
+# Production annotations
+commonAnnotations:
+  owner: platform-team

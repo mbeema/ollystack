@@ -1,0 +1,79 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ollystack-ingress
+  namespace: ollystack
+  labels:
+    app.kubernetes.io/name: ollystack
+    app.kubernetes.io/part-of: ollystack
+  annotations:
+    # Nginx Ingress Controller
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # Enable CORS
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    # SSL redirect (enable when you have TLS)
+    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Rate limiting
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-connections: "50"
+spec:
+  # TLS configuration (uncomment when ready)
+  # tls:
+  #   - hosts:
+  #       - ollystack.yourdomain.com
+  #     secretName: ollystack-tls
+  rules:
+    - host: ollystack.yourdomain.com  # Change this to your domain
+      http:
+        paths:
+          # Web UI
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web-ui
+                port:
+                  number: 80
+          # API
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api-server
+                port:
+                  number: 8080
+          # Health check
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: api-server
+                port:
+                  number: 8080
+---
+# Optional: Ingress for OTLP (if you want external ingestion via ingress)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ollystack-otlp-ingress
+  namespace: ollystack
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+spec:
+  rules:
+    - host: otlp.yourdomain.com  # Change this to your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: otel-collector
+                port:
+                  number: 4317
