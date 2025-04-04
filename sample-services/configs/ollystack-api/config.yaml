@@ -1,0 +1,52 @@
+server:
+  address: ":8080"
+  mode: "release"
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 120s
+  cors:
+    enabled: true
+    allowed_origins:
+      - "*"
+    allowed_methods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowed_headers:
+      - Authorization
+      - Content-Type
+      - X-Correlation-ID
+
+auth:
+  enabled: false
+
+storage:
+  metrics:
+    type: clickhouse
+    endpoint: "clickhouse:9000"
+    database: ollystack
+    username: default
+    password: "${CLICKHOUSE_PASSWORD:-changeme}"
+  logs:
+    type: clickhouse
+    endpoint: "clickhouse:9000"
+    database: ollystack
+    username: default
+    password: "${CLICKHOUSE_PASSWORD:-changeme}"
+  traces:
+    type: clickhouse
+    endpoint: "clickhouse:9000"
+    database: ollystack
+    username: default
+    password: "${CLICKHOUSE_PASSWORD:-changeme}"
+
+ai:
+  enabled: true
+  endpoint: "http://ai-engine:8080"
+
+features:
+  service_map: true
+  anomaly_detection: true
+  natural_language: true

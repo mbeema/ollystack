@@ -1,0 +1,130 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # Add correlation_id attribute to all telemetry
+  attributes/correlation:
+    actions:
+      - key: correlation_id
+        action: upsert
+        from_attribute: correlation_id
+      - key: ollystack.version
+        value: "1.0.0"
+        action: insert
+
+  # Transform processor to generate correlation_id if missing
+  transform/correlation:
+    trace_statements:
+      - context: span
+        statements:
+          - set(attributes["correlation_id"], Concat(["olly-", Substring(TraceID().String(), 0, 16)])) where attributes["correlation_id"] == nil
+    log_statements:
+      - context: log
+        statements:
+          - set(attributes["correlation_id"], Concat(["olly-", Substring(UUID(), 0, 16)])) where attributes["correlation_id"] == nil
+
+  # Resource detection
+  resourcedetection:
+    detectors: [env, system, docker]
+    timeout: 5s
+    override: false
+
+exporters:
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s&compress=lz4
+    database: ollystack
+    username: default
+    password: ${CLICKHOUSE_PASSWORD:-changeme}
+    ttl: 72h
+    logs_table_name: logs
+    traces_table_name: traces
+    metrics_table_name: metrics
+    timeout: 30s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+  # ClickHouse exporter for metrics with exemplar support
+  # Stores exemplars with trace_id/span_id for trace-to-metric linking
+  clickhouse/metrics:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s&compress=lz4
+    database: ollystack
+    username: default
+    password: ${CLICKHOUSE_PASSWORD:-changeme}
+    ttl: 72h
+    metrics_table_name: otel_metrics
+    timeout: 30s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+  debug:
+    verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+  # Prometheus exporter with exemplar support
+  # Exemplars are exposed via the exemplar API endpoint
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: ollystack
+    # Enable exemplars in Prometheus exposition format
+    enable_open_metrics: true
+
+  # OTLP exporter for Grafana Mimir/Tempo (if using Grafana stack)
+  otlp/grafana:
+    endpoint: "mimir:9009"
+    tls:
+      insecure: true
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, zpages]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/correlation, batch]
+      exporters: [clickhouse, debug]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/correlation, batch]
+      exporters: [clickhouse, debug]
+
+    # Metrics pipeline with exemplar preservation
+    # Exemplars flow through: SDK -> OTLP -> Collector -> ClickHouse/Prometheus
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse/metrics, prometheus]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888

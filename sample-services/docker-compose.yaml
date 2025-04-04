@@ -1,0 +1,204 @@
+version: '3.8'
+
+# Uses existing ClickHouse and Redis from ollystack network
+# Only deploys sample microservices
+
+services:
+  # ===========================================
+  # PostgreSQL (for order/inventory data)
+  # ===========================================
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ollystack-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=ollystack
+      - POSTGRES_PASSWORD=ollystack123
+      - POSTGRES_DB=orders
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./configs/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ollystack -d orders"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+
+  # ===========================================
+  # Sample Microservices
+  # ===========================================
+
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: ollystack-api-gateway
+    ports:
+      - "8081:8080"
+    environment:
+      - SERVICE_NAME=api-gateway
+      - ORDER_SERVICE_URL=http://order-service:8080
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=api-gateway
+      - REDIS_URL=ollystack-redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+
+  order-service:
+    build:
+      context: ./services/order-service
+      dockerfile: Dockerfile
+    container_name: ollystack-order-service
+    ports:
+      - "8082:8080"
+    environment:
+      - SERVICE_NAME=order-service
+      - PAYMENT_SERVICE_URL=http://payment-service:8080
+      - INVENTORY_SERVICE_URL=http://inventory-service:8080
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=order-service
+      - POSTGRES_URL=postgres://ollystack:ollystack123@postgres:5432/orders?sslmode=disable
+      - REDIS_URL=ollystack-redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+
+  payment-service:
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+    container_name: ollystack-payment-service
+    ports:
+      - "8083:8080"
+    environment:
+      - SERVICE_NAME=payment-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=payment-service
+      - REDIS_URL=ollystack-redis:6379
+      - FAILURE_RATE=0.05
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+
+  inventory-service:
+    build:
+      context: ./services/inventory-service
+      dockerfile: Dockerfile
+    container_name: ollystack-inventory-service
+    ports:
+      - "8084:8080"
+    environment:
+      - SERVICE_NAME=inventory-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=inventory-service
+      - POSTGRES_URL=postgres://ollystack:ollystack123@postgres:5432/orders?sslmode=disable
+      - REDIS_URL=ollystack-redis:6379
+      - FAILURE_RATE=0.03
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+
+  notification-service:
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    container_name: ollystack-notification-service
+    ports:
+      - "8085:8080"
+    environment:
+      - SERVICE_NAME=notification-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=notification-service
+      - REDIS_URL=ollystack-redis:6379
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+
+  # ===========================================
+  # Traffic Generator
+  # ===========================================
+
+  traffic-generator:
+    build:
+      context: ./services/traffic-generator
+      dockerfile: Dockerfile
+    container_name: ollystack-traffic-generator
+    environment:
+      - API_GATEWAY_URL=http://api-gateway:8080
+      - REQUESTS_PER_SECOND=2
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=traffic-generator
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    networks:
+      - ollystack
+
+  # ===========================================
+  # AI/ML Engine
+  # ===========================================
+
+  ai-engine:
+    build:
+      context: ./services/ai-engine
+      dockerfile: Dockerfile
+    container_name: ollystack-ai-engine
+    ports:
+      - "8090:8080"
+    environment:
+      - CLICKHOUSE_HOST=ollystack-clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_USER=ollystack
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-changeme}
+      - CLICKHOUSE_DB=ollystack
+      - REDIS_URL=redis://ollystack-redis:6379
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=ai-engine
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+
+networks:
+  ollystack:
+    external: true
+
+volumes:
+  postgres-data:

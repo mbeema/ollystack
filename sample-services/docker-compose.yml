@@ -1,0 +1,292 @@
+# OllyStack Sample Services
+# Simulates a realistic microservices architecture for observability demos
+#
+# Services:
+#   - api-gateway: Entry point for all API requests
+#   - order-service: Order management (calls inventory, payment, notification)
+#   - inventory-service: Stock management (calls database, cache)
+#   - payment-service: Payment processing (calls database, email)
+#   - notification-service: Notifications (calls email)
+#   - database-service: PostgreSQL simulation
+#   - storage-service: S3/object storage simulation
+#   - cache-service: Redis simulation
+#   - email-service: SMTP simulation
+#   - traffic-generator: Generates realistic traffic patterns
+#
+# Run: docker-compose up -d
+
+version: '3.8'
+
+services:
+  # ============================================================================
+  # Infrastructure Services (Simulated)
+  # ============================================================================
+
+  database-service:
+    build:
+      context: ./services/database-service
+      dockerfile: Dockerfile
+    container_name: ollystack-database-service
+    ports:
+      - "8086:8086"
+    environment:
+      - PORT=8086
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=database-service
+      - FAILURE_RATE=0.02
+    networks:
+      - ollystack
+    restart: unless-stopped
+
+  storage-service:
+    build:
+      context: ./services/storage-service
+      dockerfile: Dockerfile
+    container_name: ollystack-storage-service
+    ports:
+      - "8092:8087"
+    environment:
+      - PORT=8087
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=storage-service
+      - FAILURE_RATE=0.01
+    networks:
+      - ollystack
+    restart: unless-stopped
+
+  cache-service:
+    build:
+      context: ./services/cache-service
+      dockerfile: Dockerfile
+    container_name: ollystack-cache-service
+    ports:
+      - "8088:8088"
+    environment:
+      - PORT=8088
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=cache-service
+      - FAILURE_RATE=0.005
+    networks:
+      - ollystack
+    restart: unless-stopped
+
+  email-service:
+    build:
+      context: ./services/email-service
+      dockerfile: Dockerfile
+    container_name: ollystack-email-service
+    ports:
+      - "8089:8089"
+    environment:
+      - PORT=8089
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=email-service
+      - FAILURE_RATE=0.02
+    networks:
+      - ollystack
+    restart: unless-stopped
+
+  # ============================================================================
+  # Application Services
+  # ============================================================================
+
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: ollystack-api-gateway
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=api-gateway
+      - ORDER_SERVICE_URL=http://ollystack-order-service:8083
+      - CACHE_SERVICE_URL=http://ollystack-cache-service:8088
+      - FAILURE_RATE=0.01
+    depends_on:
+      - order-service
+      - cache-service
+    networks:
+      - ollystack
+    restart: unless-stopped
+
+  order-service:
+    build:
+      context: ./services/order-service
+      dockerfile: Dockerfile
+    container_name: ollystack-order-service
+    ports:
+      - "8083:8083"
+    environment:
+      - PORT=8083
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=order-service
+      - INVENTORY_SERVICE_URL=http://ollystack-inventory-service:8084
+      - PAYMENT_SERVICE_URL=http://ollystack-payment-service:8085
+      - NOTIFICATION_SERVICE_URL=http://ollystack-notification-service:8090
+      - DATABASE_SERVICE_URL=http://ollystack-database-service:8086
+      - FAILURE_RATE=0.05
+    depends_on:
+      - inventory-service
+      - payment-service
+      - notification-service
+      - database-service
+    networks:
+      - ollystack
+    restart: unless-stopped
+
+  inventory-service:
+    build:
+      context: ./services/inventory-service
+      dockerfile: Dockerfile
+    container_name: ollystack-inventory-service
+    ports:
+      - "8084:8084"
+    environment:
+      - PORT=8084
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=inventory-service
+      - DATABASE_SERVICE_URL=http://ollystack-database-service:8086
+      - CACHE_SERVICE_URL=http://ollystack-cache-service:8088
+      - POSTGRES_HOST=ollystack-postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=ollystack
+      - POSTGRES_PASSWORD=ollystack123
+      - POSTGRES_DB=ollystack
+      - REDIS_HOST=ollystack-redis
+      - REDIS_PORT=6379
+      - FAILURE_RATE=0.03
+    depends_on:
+      - database-service
+      - cache-service
+    networks:
+      - ollystack
+    restart: unless-stopped
+
+  payment-service:
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+    container_name: ollystack-payment-service
+    ports:
+      - "8085:8085"
+    environment:
+      - PORT=8085
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=payment-service
+      - DATABASE_SERVICE_URL=http://ollystack-database-service:8086
+      - STORAGE_SERVICE_URL=http://ollystack-storage-service:8087
+      - POSTGRES_HOST=ollystack-postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=ollystack
+      - POSTGRES_PASSWORD=ollystack123
+      - POSTGRES_DB=ollystack
+      - FAILURE_RATE=0.02
+    depends_on:
+      - database-service
+      - storage-service
+    networks:
+      - ollystack
+    restart: unless-stopped
+
+  notification-service:
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    container_name: ollystack-notification-service
+    ports:
+      - "8093:8090"
+    environment:
+      - PORT=8090
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=notification-service
+      - EMAIL_SERVICE_URL=http://ollystack-email-service:8089
+      - REDIS_HOST=ollystack-redis
+      - REDIS_PORT=6379
+      - FAILURE_RATE=0.01
+    depends_on:
+      - email-service
+    networks:
+      - ollystack
+    restart: unless-stopped
+
+  ai-engine:
+    build:
+      context: ./services/ai-engine
+      dockerfile: Dockerfile
+    container_name: ollystack-ai-engine
+    ports:
+      - "8091:8091"
+    environment:
+      - PORT=8091
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=ai-engine
+      - STORAGE_SERVICE_URL=http://ollystack-storage-service:8087
+      - CACHE_SERVICE_URL=http://ollystack-cache-service:8088
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    depends_on:
+      - storage-service
+      - cache-service
+    networks:
+      - ollystack
+    restart: unless-stopped
+
+  # ============================================================================
+  # Traffic Generator
+  # ============================================================================
+
+  traffic-generator:
+    build:
+      context: ./services/traffic-generator
+      dockerfile: Dockerfile
+    container_name: ollystack-traffic-generator
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=ollystack-collector:4317
+      - OTEL_SERVICE_NAME=traffic-generator
+      - API_GATEWAY_URL=http://ollystack-api-gateway:8082
+      - DATABASE_SERVICE_URL=http://ollystack-database-service:8086
+      - STORAGE_SERVICE_URL=http://ollystack-storage-service:8087
+      - CACHE_SERVICE_URL=http://ollystack-cache-service:8088
+      - EMAIL_SERVICE_URL=http://ollystack-email-service:8089
+      - REQUESTS_PER_SECOND=5
+    depends_on:
+      - api-gateway
+      - database-service
+      - storage-service
+      - cache-service
+      - email-service
+    networks:
+      - ollystack
+    restart: unless-stopped
+
+  # ============================================================================
+  # PostgreSQL (Real - for services that need actual persistence)
+  # ============================================================================
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ollystack-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=ollystack
+      - POSTGRES_PASSWORD=ollystack123
+      - POSTGRES_DB=ollystack
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ollystack"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ollystack
+    restart: unless-stopped
+
+networks:
+  ollystack:
+    external: true
+
+volumes:
+  postgres_data:

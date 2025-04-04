@@ -1,0 +1,13 @@
+<clickhouse>
+    <users>
+        <ollystack>
+            <password>ollystack123</password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+        </ollystack>
+    </users>
+</clickhouse>
