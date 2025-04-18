@@ -1,0 +1,43 @@
+apiVersion: 1
+
+datasources:
+  # ClickHouse for traces and logs
+  - name: OllyStack-ClickHouse
+    type: grafana-clickhouse-datasource
+    uid: ollystack-clickhouse
+    url: http://${CLICKHOUSE_HOST:-clickhouse}:8123
+    jsonData:
+      defaultDatabase: ollystack
+      protocol: http
+      port: 8123
+    secureJsonData:
+      password: ${CLICKHOUSE_PASSWORD:-}
+    editable: true
+    isDefault: false
+
+  # Prometheus for metrics
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    url: http://${PROMETHEUS_HOST:-prometheus}:9090
+    jsonData:
+      httpMethod: POST
+      timeInterval: "15s"
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: ollystack-clickhouse
+          urlDisplayLabel: 'View Trace in ClickHouse'
+        - name: correlation_id
+          datasourceUid: ollystack-clickhouse
+          urlDisplayLabel: 'View Correlation'
+    isDefault: true
+    editable: true
+
+  # Alertmanager
+  - name: Alertmanager
+    type: alertmanager
+    uid: alertmanager
+    url: http://${ALERTMANAGER_HOST:-alertmanager}:9093
+    jsonData:
+      implementation: prometheus
+    editable: true

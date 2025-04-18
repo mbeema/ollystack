@@ -1,0 +1,215 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "Requests/sec", "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2},
+          "unit": "reqps"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum(rate(traces_spanmetrics_calls_total{service_name=~\"$service\"}[$__rate_interval])) by (service_name)",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Request Rate by Service",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "Latency (ms)", "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2},
+          "unit": "ms"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.95, sum(rate(traces_spanmetrics_latency_bucket{service_name=~\"$service\"}[$__rate_interval])) by (service_name, le))",
+          "legendFormat": "{{service_name}} p95",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.50, sum(rate(traces_spanmetrics_latency_bucket{service_name=~\"$service\"}[$__rate_interval])) by (service_name, le))",
+          "legendFormat": "{{service_name}} p50",
+          "refId": "B"
+        }
+      ],
+      "title": "Latency by Service (p50/p95)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "Error Rate %", "drawStyle": "line", "fillOpacity": 20, "lineWidth": 2},
+          "max": 100,
+          "min": 0,
+          "unit": "percent"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "100 * sum(rate(traces_spanmetrics_calls_total{service_name=~\"$service\", status_code=\"STATUS_CODE_ERROR\"}[$__rate_interval])) by (service_name) / sum(rate(traces_spanmetrics_calls_total{service_name=~\"$service\"}[$__rate_interval])) by (service_name)",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Error Rate by Service",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "auto"}},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "error_count"},
+            "properties": [
+              {"id": "custom.displayMode", "value": "color-background-solid"},
+              {"id": "thresholds", "value": {"mode": "absolute", "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 1},
+                {"color": "red", "value": 10}
+              ]}}
+            ]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "options": {"showHeader": true, "cellHeight": "sm"},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+          "format": 1,
+          "rawSql": "SELECT \n  correlation_id,\n  groupUniqArray(ServiceName) as services,\n  count() as span_count,\n  countIf(StatusCode = 'ERROR') as error_count,\n  max(Duration) / 1000000 as max_duration_ms,\n  min(Timestamp) as started_at\nFROM ollystack.traces\nWHERE Timestamp >= now() - INTERVAL 1 HOUR\n  AND correlation_id != ''\n  AND ServiceName IN (${service:sqlstring})\nGROUP BY correlation_id\nHAVING error_count > 0\nORDER BY started_at DESC\nLIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "Recent Correlations with Errors",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        }
+      },
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 16},
+      "id": 5,
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right", "values": ["value"]},
+        "pieType": "donut"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+          "format": 1,
+          "rawSql": "SELECT \n  ServiceName,\n  count() as requests\nFROM ollystack.traces\nWHERE Timestamp >= now() - INTERVAL 1 HOUR\nGROUP BY ServiceName\nORDER BY requests DESC\nLIMIT 10",
+          "refId": "A"
+        }
+      ],
+      "title": "Request Distribution by Service",
+      "type": "piechart"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "auto"}}
+      },
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 16},
+      "id": 6,
+      "options": {"showHeader": true, "cellHeight": "sm"},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+          "format": 1,
+          "rawSql": "SELECT \n  SpanName,\n  ServiceName,\n  count() as call_count,\n  avg(Duration) / 1000000 as avg_ms,\n  max(Duration) / 1000000 as max_ms\nFROM ollystack.traces\nWHERE Timestamp >= now() - INTERVAL 1 HOUR\nGROUP BY SpanName, ServiceName\nORDER BY avg_ms DESC\nLIMIT 10",
+          "refId": "A"
+        }
+      ],
+      "title": "Slowest Operations",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "auto"}}
+      },
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 16},
+      "id": 7,
+      "options": {"showHeader": true, "cellHeight": "sm"},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+          "format": 1,
+          "rawSql": "SELECT \n  StatusMessage,\n  ServiceName,\n  count() as error_count\nFROM ollystack.traces\nWHERE Timestamp >= now() - INTERVAL 1 HOUR\n  AND StatusCode = 'ERROR'\n  AND StatusMessage != ''\nGROUP BY StatusMessage, ServiceName\nORDER BY error_count DESC\nLIMIT 10",
+          "refId": "A"
+        }
+      ],
+      "title": "Top Error Messages",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "tags": ["ollystack", "services", "overview"],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {"text": "All", "value": "$__all"},
+        "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+        "definition": "SELECT DISTINCT ServiceName FROM ollystack.traces WHERE Timestamp >= now() - INTERVAL 1 DAY",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Service",
+        "multi": true,
+        "name": "service",
+        "options": [],
+        "query": "SELECT DISTINCT ServiceName FROM ollystack.traces WHERE Timestamp >= now() - INTERVAL 1 DAY",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "OllyStack - Services Overview",
+  "uid": "ollystack-services-overview",
+  "version": 1
+}

@@ -1,0 +1,281 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "gridPos": {"h": 3, "w": 24, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "content": "# OllyStack Correlation Explorer\n\nEnter a **correlation_id** to view all related traces, logs, and metrics across your distributed system.\n\n**Format:** `olly-{timestamp}-{suffix}` (e.g., `olly-2n9c3ok-a1b2c3d4`)",
+        "mode": "markdown"
+      },
+      "title": "",
+      "type": "text"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "duration_ms"},
+            "properties": [
+              {"id": "custom.displayMode", "value": "color-background-solid"},
+              {"id": "thresholds", "value": {"mode": "absolute", "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 100},
+                {"color": "red", "value": 1000}
+              ]}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "StatusCode"},
+            "properties": [
+              {"id": "custom.displayMode", "value": "color-background-solid"},
+              {"id": "mappings", "value": [
+                {"options": {"ERROR": {"color": "red", "index": 0}}, "type": "value"},
+                {"options": {"OK": {"color": "green", "index": 1}}, "type": "value"}
+              ]}
+            ]
+          }
+        ]
+      },
+      "gridPos": {"h": 10, "w": 12, "x": 0, "y": 3},
+      "id": 2,
+      "options": {"showHeader": true, "cellHeight": "sm"},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+          "format": 1,
+          "rawSql": "SELECT \n  Timestamp,\n  ServiceName,\n  SpanName,\n  Duration / 1000000 as duration_ms,\n  StatusCode,\n  TraceId\nFROM ollystack.traces \nWHERE correlation_id = '${correlation_id}'\nORDER BY Timestamp ASC\nLIMIT 100",
+          "refId": "A"
+        }
+      ],
+      "title": "Traces for Correlation: ${correlation_id}",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"align": "auto"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "SeverityText"},
+            "properties": [
+              {"id": "custom.displayMode", "value": "color-background-solid"},
+              {"id": "mappings", "value": [
+                {"options": {"ERROR": {"color": "red", "index": 0}}, "type": "value"},
+                {"options": {"WARN": {"color": "yellow", "index": 1}}, "type": "value"},
+                {"options": {"INFO": {"color": "green", "index": 2}}, "type": "value"}
+              ]}
+            ]
+          }
+        ]
+      },
+      "gridPos": {"h": 10, "w": 12, "x": 12, "y": 3},
+      "id": 3,
+      "options": {"showHeader": true, "cellHeight": "sm"},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+          "format": 1,
+          "rawSql": "SELECT \n  Timestamp,\n  ServiceName,\n  SeverityText,\n  Body\nFROM ollystack.logs \nWHERE correlation_id = '${correlation_id}'\nORDER BY Timestamp ASC\nLIMIT 100",
+          "refId": "A"
+        }
+      ],
+      "title": "Logs for Correlation: ${correlation_id}",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Duration (ms)",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto"
+          }
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "id": 4,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+          "format": 2,
+          "rawSql": "SELECT \n  Timestamp as time,\n  Duration / 1000000 as duration_ms,\n  ServiceName\nFROM ollystack.traces \nWHERE correlation_id = '${correlation_id}'\nORDER BY Timestamp ASC",
+          "refId": "A"
+        }
+      ],
+      "title": "Span Durations Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        }
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 13},
+      "id": 5,
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right", "values": ["value"]},
+        "pieType": "pie",
+        "reduceOptions": {"calcs": ["sum"], "fields": "", "values": false}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+          "format": 1,
+          "rawSql": "SELECT \n  ServiceName,\n  count() as span_count\nFROM ollystack.traces \nWHERE correlation_id = '${correlation_id}'\nGROUP BY ServiceName\nORDER BY span_count DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Spans by Service",
+      "type": "piechart"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "red", "value": 1}
+          ]}
+        }
+      },
+      "gridPos": {"h": 4, "w": 3, "x": 18, "y": 13},
+      "id": 6,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "reduceOptions": {"calcs": ["sum"], "fields": "", "values": false}},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+          "format": 1,
+          "rawSql": "SELECT countIf(StatusCode = 'ERROR') as errors FROM ollystack.traces WHERE correlation_id = '${correlation_id}'",
+          "refId": "A"
+        }
+      ],
+      "title": "Errors",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]},
+          "unit": "ms"
+        }
+      },
+      "gridPos": {"h": 4, "w": 3, "x": 21, "y": 13},
+      "id": 7,
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "reduceOptions": {"calcs": ["sum"], "fields": "", "values": false}},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+          "format": 1,
+          "rawSql": "SELECT max(Duration) / 1000000 as max_duration_ms FROM ollystack.traces WHERE correlation_id = '${correlation_id}'",
+          "refId": "A"
+        }
+      ],
+      "title": "Max Latency",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        }
+      },
+      "gridPos": {"h": 4, "w": 3, "x": 18, "y": 17},
+      "id": 8,
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "reduceOptions": {"calcs": ["sum"], "fields": "", "values": false}},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+          "format": 1,
+          "rawSql": "SELECT count() as span_count FROM ollystack.traces WHERE correlation_id = '${correlation_id}'",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Spans",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "purple", "value": null}]}
+        }
+      },
+      "gridPos": {"h": 4, "w": 3, "x": 21, "y": 17},
+      "id": 9,
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "center", "reduceOptions": {"calcs": ["sum"], "fields": "", "values": false}},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-clickhouse-datasource", "uid": "ollystack-clickhouse"},
+          "format": 1,
+          "rawSql": "SELECT uniqExact(ServiceName) as service_count FROM ollystack.traces WHERE correlation_id = '${correlation_id}'",
+          "refId": "A"
+        }
+      ],
+      "title": "Services",
+      "type": "stat"
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 38,
+  "tags": ["ollystack", "correlation"],
+  "templating": {
+    "list": [
+      {
+        "current": {"text": "", "value": ""},
+        "hide": 0,
+        "label": "Correlation ID",
+        "name": "correlation_id",
+        "options": [],
+        "query": "",
+        "skipUrlSync": false,
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "OllyStack - Correlation Explorer",
+  "uid": "ollystack-correlation-explorer",
+  "version": 1
+}

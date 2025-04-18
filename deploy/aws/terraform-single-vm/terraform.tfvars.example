@@ -1,0 +1,43 @@
+# =============================================================================
+# OllyStack MVP - Terraform Variables
+# =============================================================================
+# Copy this file to terraform.tfvars and customize
+
+# AWS Region
+aws_region = "us-east-1"
+
+# Project name (used for resource naming)
+project_name = "ollystack"
+
+# Instance type - t3.medium is good balance for MVP
+# t3.medium: 2 vCPU, 4GB RAM (~$0.01/hr spot = ~$7-10/month)
+# t3.large:  2 vCPU, 8GB RAM (~$0.02/hr spot = ~$15-20/month) - if you need more memory
+instance_type = "t3.medium"
+
+# Maximum spot price (leave empty for on-demand price cap)
+# Current t3.medium spot price in us-east-1 is ~$0.01/hr
+spot_max_price = "0.02"
+
+# Volume sizes
+root_volume_size = 20  # GB - for OS and Docker
+data_volume_size = 50  # GB - for ClickHouse data (survives instance termination)
+
+# SSH Access - CHOOSE ONE:
+# Option 1: Provide your public key directly
+# ssh_public_key = "ssh-rsa AAAA... your-email@example.com"
+
+# Option 2: Use an existing AWS key pair
+# existing_key_pair = "my-existing-keypair"
+
+# Network access control
+# IMPORTANT: Restrict these in production!
+ssh_allowed_cidr  = ["0.0.0.0/0"]  # Your IP: ["1.2.3.4/32"]
+app_allowed_cidr  = ["0.0.0.0/0"]  # Your IP or VPN range
+otlp_allowed_cidr = ["0.0.0.0/0"]  # Your application servers
+
+# Application settings
+clickhouse_password = "changeme"  # Change in production!
+jwt_secret          = "change-me-use-random-32-char-string"
+
+# Optional: Domain name (for future SSL setup)
+# domain_name = "ollystack.example.com"

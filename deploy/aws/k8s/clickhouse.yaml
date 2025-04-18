@@ -1,0 +1,275 @@
+# Self-hosted ClickHouse on EKS with Graviton
+# Cost-optimized for AWS
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ollystack
+---
+# ClickHouse ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-config
+  namespace: ollystack
+data:
+  config.xml: |
+    <?xml version="1.0"?>
+    <clickhouse>
+        <logger>
+            <level>information</level>
+            <console>true</console>
+        </logger>
+
+        <http_port>8123</http_port>
+        <tcp_port>9000</tcp_port>
+        <interserver_http_port>9009</interserver_http_port>
+
+        <max_connections>4096</max_connections>
+        <keep_alive_timeout>3</keep_alive_timeout>
+        <max_concurrent_queries>100</max_concurrent_queries>
+
+        <uncompressed_cache_size>8589934592</uncompressed_cache_size>
+        <mark_cache_size>5368709120</mark_cache_size>
+
+        <path>/var/lib/clickhouse/</path>
+        <tmp_path>/var/lib/clickhouse/tmp/</tmp_path>
+        <user_files_path>/var/lib/clickhouse/user_files/</user_files_path>
+
+        <users_config>users.xml</users_config>
+        <default_profile>default</default_profile>
+        <default_database>default</default_database>
+
+        <mlock_executable>true</mlock_executable>
+
+        <builtin_dictionaries_reload_interval>3600</builtin_dictionaries_reload_interval>
+
+        <max_table_size_to_drop>0</max_table_size_to_drop>
+        <max_partition_size_to_drop>0</max_partition_size_to_drop>
+
+        <!-- S3 storage for cold data -->
+        <storage_configuration>
+            <disks>
+                <default>
+                    <keep_free_space_bytes>1073741824</keep_free_space_bytes>
+                </default>
+                <s3>
+                    <type>s3</type>
+                    <endpoint>https://s3.us-east-2.amazonaws.com/BUCKET_NAME/clickhouse/</endpoint>
+                    <use_environment_credentials>true</use_environment_credentials>
+                </s3>
+            </disks>
+            <policies>
+                <tiered>
+                    <volumes>
+                        <hot>
+                            <disk>default</disk>
+                        </hot>
+                        <cold>
+                            <disk>s3</disk>
+                        </cold>
+                    </volumes>
+                    <move_factor>0.2</move_factor>
+                </tiered>
+            </policies>
+        </storage_configuration>
+    </clickhouse>
+
+  users.xml: |
+    <?xml version="1.0"?>
+    <clickhouse>
+        <profiles>
+            <default>
+                <max_memory_usage>10000000000</max_memory_usage>
+                <use_uncompressed_cache>0</use_uncompressed_cache>
+                <load_balancing>random</load_balancing>
+            </default>
+            <readonly>
+                <readonly>1</readonly>
+            </readonly>
+        </profiles>
+
+        <users>
+            <default>
+                <password_sha256_hex>CHANGE_ME</password_sha256_hex>
+                <networks>
+                    <ip>::/0</ip>
+                </networks>
+                <profile>default</profile>
+                <quota>default</quota>
+                <access_management>1</access_management>
+            </default>
+        </users>
+
+        <quotas>
+            <default>
+                <interval>
+                    <duration>3600</duration>
+                    <queries>0</queries>
+                    <errors>0</errors>
+                    <result_rows>0</result_rows>
+                    <read_rows>0</read_rows>
+                    <execution_time>0</execution_time>
+                </interval>
+            </default>
+        </quotas>
+    </clickhouse>
+---
+# ClickHouse StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: ollystack
+  labels:
+    app: clickhouse
+spec:
+  serviceName: clickhouse
+  replicas: 1  # Start with 1, scale to 3 for HA
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+        workload-type: stateful
+    spec:
+      # Schedule on On-Demand ARM64 nodes
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      tolerations:
+        - key: "workload-type"
+          operator: "Equal"
+          value: "stateful"
+          effect: "NoSchedule"
+
+      # Anti-affinity to spread across AZs
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: clickhouse
+                topologyKey: topology.kubernetes.io/zone
+
+      serviceAccountName: clickhouse
+
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:24.1-alpine
+          ports:
+            - name: http
+              containerPort: 8123
+            - name: tcp
+              containerPort: 9000
+            - name: interserver
+              containerPort: 9009
+
+          env:
+            - name: CLICKHOUSE_DB
+              value: ollystack
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+
+          resources:
+            requests:
+              cpu: "1"
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+            - name: config
+              mountPath: /etc/clickhouse-server/config.d
+            - name: users
+              mountPath: /etc/clickhouse-server/users.d
+
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 8123
+            initialDelaySeconds: 30
+            periodSeconds: 10
+
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8123
+            initialDelaySeconds: 10
+            periodSeconds: 5
+
+      volumes:
+        - name: config
+          configMap:
+            name: clickhouse-config
+            items:
+              - key: config.xml
+                path: config.xml
+        - name: users
+          configMap:
+            name: clickhouse-config
+            items:
+              - key: users.xml
+                path: users.xml
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 100Gi  # Adjust based on needs
+---
+# ClickHouse Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: ollystack
+  labels:
+    app: clickhouse
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8123
+      targetPort: 8123
+    - name: tcp
+      port: 9000
+      targetPort: 9000
+  selector:
+    app: clickhouse
+---
+# ClickHouse Service Account (for S3 access via IRSA)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clickhouse
+  namespace: ollystack
+  annotations:
+    # This will be set by Terraform after IRSA role is created
+    eks.amazonaws.com/role-arn: "arn:aws:iam::ACCOUNT_ID:role/ollystack-clickhouse-s3"
+---
+# GP3 StorageClass (if not default)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  fsType: ext4
+  encrypted: "true"
+  iops: "3000"
+  throughput: "125"
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
