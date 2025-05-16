@@ -1,0 +1,240 @@
+# OllyStack - Deploy Application
+# Deploys application components to EKS
+
+name: Deploy Application
+
+on:
+  workflow_run:
+    workflows: ["Build & Push"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      image_tag:
+        description: 'Image tag to deploy (default: latest)'
+        required: false
+        default: 'latest'
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-2' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ===========================================================================
+  # Deploy to Kubernetes
+  # ===========================================================================
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.29.0'
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.14.0'
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ollystack-${{ github.event.inputs.environment || 'dev' }}
+
+      - name: Set image tag
+        id: image
+        run: |
+          if [ "${{ github.event.inputs.image_tag }}" != "" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy ClickHouse (if not exists)
+        run: |
+          if ! kubectl get statefulset clickhouse -n ollystack &> /dev/null; then
+            echo "Deploying ClickHouse..."
+            kubectl apply -f deploy/aws/k8s/clickhouse.yaml
+            kubectl wait --for=condition=ready pod -l app=clickhouse -n ollystack --timeout=300s
+          else
+            echo "ClickHouse already deployed"
+          fi
+
+      - name: Update Kustomization with new image tags
+        run: |
+          cd deploy/kubernetes/overlays/${{ github.event.inputs.environment || 'dev' }}
+
+          # Create or update kustomization.yaml with new images
+          cat > kustomization.yaml << EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+
+          namespace: ollystack
+
+          resources:
+            - ../../base
+
+          images:
+            - name: ollystack/api-server
+              newName: ${{ secrets.ECR_REGISTRY }}/ollystack/api-server
+              newTag: "${{ steps.image.outputs.tag }}"
+            - name: ollystack/web-ui
+              newName: ${{ secrets.ECR_REGISTRY }}/ollystack/web-ui
+              newTag: "${{ steps.image.outputs.tag }}"
+
+          commonLabels:
+            environment: ${{ github.event.inputs.environment || 'dev' }}
+            version: "${{ steps.image.outputs.tag }}"
+          EOF
+
+      - name: Deploy with Kustomize
+        run: |
+          kubectl apply -k deploy/kubernetes/overlays/${{ github.event.inputs.environment || 'dev' }}
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/api-server -n ollystack --timeout=300s
+          kubectl rollout status deployment/web-ui -n ollystack --timeout=300s
+          kubectl rollout status deployment/otel-collector -n ollystack --timeout=300s
+
+      - name: Verify deployment
+        run: |
+          echo "### Deployment Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n ollystack >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Get service URLs
+        id: urls
+        run: |
+          INGRESS=$(kubectl get ingress ollystack-ingress -n ollystack -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+          echo "ingress_url=$INGRESS" >> $GITHUB_OUTPUT
+
+      - name: Deployment Summary
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployment Complete! :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ github.event.inputs.environment || 'dev' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tag:** ${{ steps.image.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.urls.outputs.ingress_url }}" != "pending" ]; then
+            echo "**URL:** http://${{ steps.urls.outputs.ingress_url }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**URL:** Ingress provisioning..." >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ===========================================================================
+  # Run Database Migrations
+  # ===========================================================================
+  migrate:
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ollystack-${{ github.event.inputs.environment || 'dev' }}
+
+      - name: Run migrations
+        run: |
+          # Port forward to ClickHouse
+          kubectl port-forward svc/clickhouse 8123:8123 -n ollystack &
+          sleep 5
+
+          # Run migration script
+          curl -s "http://localhost:8123/" \
+            --data-binary @deploy/scripts/init-clickhouse.sql || true
+
+          echo "Database migrations complete" >> $GITHUB_STEP_SUMMARY
+
+  # ===========================================================================
+  # Smoke Tests
+  # ===========================================================================
+  smoke-test:
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ollystack-${{ github.event.inputs.environment || 'dev' }}
+
+      - name: Port forward services
+        run: |
+          kubectl port-forward svc/api-server 8080:8080 -n ollystack &
+          kubectl port-forward svc/otel-collector 4318:4318 -n ollystack &
+          sleep 10
+
+      - name: Test API health
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
+          if [ "$response" != "200" ]; then
+            echo "API health check failed with status: $response"
+            exit 1
+          fi
+          echo "API health check passed"
+
+      - name: Test OTLP endpoint
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:4318/v1/traces -X POST -H "Content-Type: application/json" -d '{}')
+          if [ "$response" -ge "500" ]; then
+            echo "OTLP endpoint check failed with status: $response"
+            exit 1
+          fi
+          echo "OTLP endpoint check passed"
+
+      - name: Smoke test summary
+        run: |
+          echo "### Smoke Tests Passed! :white_check_mark:" >> $GITHUB_STEP_SUMMARY

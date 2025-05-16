@@ -1,0 +1,209 @@
+# OllyStack - Release
+# Creates releases and deploys to production
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-2' }}
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # ===========================================================================
+  # Create Release
+  # ===========================================================================
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        uses: orhun/git-cliff-action@v3
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body: ${{ steps.changelog.outputs.content }}
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          generate_release_notes: true
+
+  # ===========================================================================
+  # Build Release Images
+  # ===========================================================================
+  build-images:
+    needs: release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - component: api-server
+            context: ./api-server
+          - component: web-ui
+            context: ./web-ui
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ secrets.ECR_REGISTRY }}/ollystack/${{ matrix.component }}:${{ needs.release.outputs.version }}
+            ${{ secrets.ECR_REGISTRY }}/ollystack/${{ matrix.component }}:latest
+            ghcr.io/${{ github.repository_owner }}/ollystack-${{ matrix.component }}:${{ needs.release.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/ollystack-${{ matrix.component }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ needs.release.outputs.version }}
+
+  # ===========================================================================
+  # Deploy to Production
+  # ===========================================================================
+  deploy-production:
+    needs: [release, build-images]
+    runs-on: ubuntu-latest
+    environment: prod
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ollystack-prod
+
+      - name: Update image tags
+        run: |
+          cd deploy/kubernetes/overlays/prod
+
+          cat > kustomization.yaml << EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+
+          namespace: ollystack
+
+          resources:
+            - ../../base
+
+          images:
+            - name: ollystack/api-server
+              newName: ${{ secrets.ECR_REGISTRY }}/ollystack/api-server
+              newTag: "${{ needs.release.outputs.version }}"
+            - name: ollystack/web-ui
+              newName: ${{ secrets.ECR_REGISTRY }}/ollystack/web-ui
+              newTag: "${{ needs.release.outputs.version }}"
+
+          replicas:
+            - name: api-server
+              count: 3
+            - name: otel-collector
+              count: 3
+            - name: web-ui
+              count: 2
+
+          commonLabels:
+            environment: production
+            version: "${{ needs.release.outputs.version }}"
+          EOF
+
+      - name: Deploy to production
+        run: |
+          kubectl apply -k deploy/kubernetes/overlays/prod
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/api-server -n ollystack --timeout=300s
+          kubectl rollout status deployment/web-ui -n ollystack --timeout=300s
+          kubectl rollout status deployment/otel-collector -n ollystack --timeout=300s
+
+      - name: Production deployment summary
+        run: |
+          echo "### Production Release v${{ needs.release.outputs.version }} :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n ollystack >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify Slack
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "OllyStack v${{ needs.release.outputs.version }} deployed to production! :rocket:",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*OllyStack v${{ needs.release.outputs.version }}* deployed to production! :rocket:\n<${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ needs.release.outputs.version }}|View Release>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

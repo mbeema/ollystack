@@ -1,0 +1,236 @@
+# OllyStack - Continuous Integration
+# Runs on every push and PR to build and test all components
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  GO_VERSION: '1.22'
+  NODE_VERSION: '20'
+  RUST_VERSION: '1.75'
+
+jobs:
+  # ===========================================================================
+  # Detect Changes
+  # ===========================================================================
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      api-server: ${{ steps.changes.outputs.api-server }}
+      web-ui: ${{ steps.changes.outputs.web-ui }}
+      collector: ${{ steps.changes.outputs.collector }}
+      terraform: ${{ steps.changes.outputs.terraform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            api-server:
+              - 'api-server/**'
+              - '.github/workflows/ci.yml'
+            web-ui:
+              - 'web-ui/**'
+              - '.github/workflows/ci.yml'
+            collector:
+              - 'collector/**'
+              - '.github/workflows/ci.yml'
+            terraform:
+              - 'deploy/aws/terraform/**'
+              - '.github/workflows/ci.yml'
+
+  # ===========================================================================
+  # API Server (Go)
+  # ===========================================================================
+  api-server:
+    needs: changes
+    if: needs.changes.outputs.api-server == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api-server
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: api-server/go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: "latest"
+          working-directory: api-server
+
+      - name: Run tests
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: api-server/coverage.out
+          flags: api-server
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Build
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/api-server-amd64 ./cmd/server
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/api-server-arm64 ./cmd/server
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-server-binaries
+          path: api-server/bin/
+          retention-days: 7
+
+  # ===========================================================================
+  # Web UI (React/TypeScript)
+  # ===========================================================================
+  web-ui:
+    needs: changes
+    if: needs.changes.outputs.web-ui == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web-ui
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web-ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Run tests
+        run: npm run test -- --coverage --watchAll=false
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-ui-dist
+          path: web-ui/dist/
+          retention-days: 7
+
+  # ===========================================================================
+  # Terraform Validation
+  # ===========================================================================
+  terraform:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/aws/terraform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          working_directory: deploy/aws/terraform
+
+  # ===========================================================================
+  # Docker Build Test (no push)
+  # ===========================================================================
+  docker-build:
+    needs: [api-server, web-ui]
+    if: always() && !failure() && !cancelled()
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - component: api-server
+            context: ./api-server
+            dockerfile: ./api-server/Dockerfile
+          - component: web-ui
+            context: ./web-ui
+            dockerfile: ./web-ui/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: ollystack/${{ matrix.component }}:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ===========================================================================
+  # Security Scan
+  # ===========================================================================
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
