@@ -435,7 +435,7 @@ type LogEntry struct {
 }
 
 // QueryLogs returns logs matching the query.
-func (c *ClickHouseClient) QueryLogs(ctx context.Context, serviceName string, severityText string, search string, start, end time.Time, limit int) ([]LogEntry, error) {
+func (c *ClickHouseClient) QueryLogs(ctx context.Context, serviceName string, severities []string, search string, start, end time.Time, limit int) ([]LogEntry, error) {
 	query := `
 		SELECT
 			Timestamp,
@@ -456,9 +456,9 @@ func (c *ClickHouseClient) QueryLogs(ctx context.Context, serviceName string, se
 		args = append(args, serviceName)
 	}
 
-	if severityText != "" {
-		query += " AND SeverityText = ?"
-		args = append(args, severityText)
+	if len(severities) > 0 {
+		query += " AND SeverityText IN ?"
+		args = append(args, severities)
 	}
 
 	if search != "" {

@@ -345,7 +345,7 @@ func NewLogsService(cfg *config.Config, logger *zap.Logger, ch *storage.ClickHou
 	return &LogsService{config: cfg, logger: logger, clickhouse: ch}
 }
 
-func (s *LogsService) Query(ctx context.Context, query, limit, direction string) (interface{}, error) {
+func (s *LogsService) Query(ctx context.Context, query, limit, direction, serviceName, severity, timeRange string) (interface{}, error) {
 	if s.clickhouse == nil {
 		return map[string]interface{}{"logs": []interface{}{}, "total": 0}, nil
 	}
@@ -358,9 +358,34 @@ func (s *LogsService) Query(ctx context.Context, query, limit, direction string)
 	}
 
 	end := time.Now()
-	start := end.Add(-24 * time.Hour)
+	var start time.Time
+	switch timeRange {
+	case "15m":
+		start = end.Add(-15 * time.Minute)
+	case "1h":
+		start = end.Add(-1 * time.Hour)
+	case "6h":
+		start = end.Add(-6 * time.Hour)
+	case "24h":
+		start = end.Add(-24 * time.Hour)
+	case "7d":
+		start = end.Add(-7 * 24 * time.Hour)
+	default:
+		start = end.Add(-1 * time.Hour)
+	}
 
-	logs, err := s.clickhouse.QueryLogs(ctx, "", "", query, start, end, limitInt)
+	// Parse severity filter: comma-separated list like "error,warn"
+	var severities []string
+	if severity != "" {
+		for _, s := range strings.Split(severity, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				severities = append(severities, strings.ToUpper(s))
+			}
+		}
+	}
+
+	logs, err := s.clickhouse.QueryLogs(ctx, serviceName, severities, query, start, end, limitInt)
 	if err != nil {
 		return nil, err
 	}

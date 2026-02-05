@@ -100,8 +100,11 @@ func QueryLogs(svc *services.Services) gin.HandlerFunc {
 		query := c.Query("query")
 		limit := c.DefaultQuery("limit", "100")
 		direction := c.DefaultQuery("direction", "backward")
+		serviceName := c.Query("service")
+		severity := c.Query("severity")
+		timeRange := c.DefaultQuery("timeRange", "1h")
 
-		result, err := svc.Logs.Query(c.Request.Context(), query, limit, direction)
+		result, err := svc.Logs.Query(c.Request.Context(), query, limit, direction, serviceName, severity, timeRange)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

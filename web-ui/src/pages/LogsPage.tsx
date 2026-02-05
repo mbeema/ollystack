@@ -94,8 +94,14 @@ export default function LogsPage() {
     setLoading(true);
     try {
       const API_URL = getApiUrl();
-      const params = new URLSearchParams({ limit: limit.toString() });
+      const params = new URLSearchParams({ limit: limit.toString(), timeRange });
       if (search) params.append('query', search);
+      if (selectedLevels.length > 0 && selectedLevels.length < 4) {
+        params.append('severity', selectedLevels.join(','));
+      }
+      if (selectedServices.length === 1) {
+        params.append('service', selectedServices[0]);
+      }
 
       const response = await fetch(`${API_URL}/api/v1/logs/query?${params}`);
       const data = await response.json();
@@ -111,7 +117,7 @@ export default function LogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [limit, search]);
+  }, [limit, search, timeRange, selectedLevels, selectedServices]);
 
   useEffect(() => {
     fetchLogs();
